@@ -17,6 +17,9 @@ def main():
     importer.add_argument("--profile",default="personal",help="Identity scope for exports without an account identifier")
     summary = commands.add_parser("stats")
     summary.add_argument("--database",type=Path,default=Path("data/accounting.sqlite3"))
+    web = commands.add_parser("serve",help="Open a local-only bill review interface")
+    web.add_argument("--database",type=Path,default=Path("data/accounting.sqlite3"))
+    web.add_argument("--port",type=int,default=8765)
     arguments = parser.parse_args()
     try:
         if arguments.command == "import":
@@ -33,6 +36,9 @@ def main():
                 "new_bills":report["new_bills"],"statistics":report["statistics"],
                 "classification_complete":False,"cross_platform_matching_complete":False,
             },ensure_ascii=False,indent=2))
+        elif arguments.command == "serve":
+            from .web import serve
+            serve(arguments.database,arguments.port)
         else:
             database = Database(arguments.database,readonly=True)
             try:
@@ -41,7 +47,7 @@ def main():
                 database.close()
         return 0
     except (ValueError,RuntimeError,OSError,sqlite3.DatabaseError) as error:
-        print(f"Import failed: {error}",file=sys.stderr)
+        print(f"{arguments.command} failed: {error}",file=sys.stderr)
         return 1
 
 

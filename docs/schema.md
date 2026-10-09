@@ -1,6 +1,6 @@
 # 数据库 schema spec
 
-状态：v0.2，本地导入阶段。已实现九张表的首版迁移、约束、审计和导入命令；UI、跨平台自动关联及消费分类尚未实现。可执行定义见 [schema.sql](../accounting/schema.sql)，审计及事务协议见 [database.py](../accounting/database.py)。
+状态：v0.3，本地逐笔核对阶段。已实现九张表的首版迁移、约束、审计、导入命令和浏览器核对 UI；跨平台自动关联及 AI 消费分类尚未实现。可执行定义见 [schema.sql](../accounting/schema.sql)，审计及事务协议见 [database.py](../accounting/database.py)，UI 写入接口见 [web.py](../accounting/web.py)。本轮 UI 不变更数据库版本或表结构。
 
 ## 1. 目标与已确定的边界
 

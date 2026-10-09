@@ -16,4 +16,4 @@ accounting = "accounting.__main__:main"
 packages = ["accounting"]
 
 [tool.setuptools.package-data]
-accounting = ["schema.sql"]
+accounting = ["schema.sql", "static/dist/*.html", "static/dist/assets/*.css", "static/dist/assets/*.js"]

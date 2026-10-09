@@ -6,7 +6,7 @@
 
 ## 当前状态
 
-已实现本地 SQLite 首版迁移、九张表、数据库触发器审计，以及支付宝 CSV、微信 XLSX、美团 CSV、工商银行 PDF 的导入。尚未实现浏览器 UI、跨平台自动关联或 AI 消费分类。
+已实现本地 SQLite 首版迁移、九张表、数据库触发器审计，以及支付宝 CSV、微信 XLSX、美团 CSV、工商银行 PDF 的导入。现在可以在本机浏览器中逐笔浏览、修改分类和使用日期、确认记录、添加大小类及查看修改历史。跨平台自动关联与 AI 消费分类尚未实现。
 
 - [数据库 schema spec](docs/schema.md)：表结构、跨平台关联、消费计算、审计和验收案例。
 - [可执行 schema](accounting/schema.sql) 与 [数据库写入协议](accounting/database.py)：建表、约束、触发器和审计事务。
@@ -14,16 +14,50 @@
 
 ## 本地运行
 
-需要 Python 3.11+，以及 Python 自带的 SQLite 3.38+（含 JSON 函数）。安装依赖后不需要网络即可导入；导入命令不会调用 AI、上传数据或操作 Git。
+需要 Python 3.11+，以及 Python 自带的 SQLite 3.38+（含 JSON 函数）。前端开发和首次构建还需要 Node.js 22.13+（22.x）、24.x 或 26+ 与 npm，建议使用 Node.js 24 LTS。安装依赖后不需要网络即可导入或使用已构建的界面；导入命令不会调用 AI、上传数据或操作 Git。
 
 ```sh
 python3 -m venv .venv
 source .venv/bin/activate
 python3 -m pip install -e .
+make install-ui
 make test
 make import INPUT_DIR=. DATABASE=data/accounting.sqlite3
 make stats DATABASE=data/accounting.sqlite3
+make serve DATABASE=data/accounting.sqlite3 PORT=8765
 ```
+
+启动后打开 `http://127.0.0.1:8765`；如果端口已被占用，可用 `PORT=8777` 换端口并打开对应地址。默认显示 2026 年 1—9 月、按支付日期筛选的全部记录，也可切换月份或全年。关闭终端中的服务时按 Ctrl+C；之后仍可用同一命令启动，修改保存在 SQLite 中。
+
+UI 的核对流程：
+
+1. 搜索商品、商户或交易号，按平台、月份、资金性质或核对状态筛选；每页 50 条。
+2. 选择记录，在右侧查看平台原分类和原始字段；先判断是消费、退款、收入、转账等哪种资金性质。
+3. 消费填写大类与可选小类、本人承担金额，以及可选的使用日期、备注。不确定时“保存修改”保留待核对状态。
+4. “确认并下一笔”确认当前记录、保护人工分类，并进入下一条。修改已确认记录仍需满足完整分类和金额约束。
+5. 在“分类管理”中添加大小类；在单笔详情或“修改记录”中查看执行者、理由和修改前后值。
+
+启动 UI 前会使用 SQLite 备份 API 在数据库旁的 `backups/` 目录保存副本。保存时检查记录版本，过期页面会返回冲突，不覆盖新的修改；可点击核对面板右上角刷新并重新填写。界面支持排除统计并填写原因；软删除、跨平台合并、退款/垫付分配及历史撤销暂未提供 UI 操作。
+
+服务仅绑定 `127.0.0.1`，校验 Host、Origin 和写入令牌，禁止跨站访问；静态资源没有 CDN 或第三方脚本，响应不缓存。它不是多用户生产服务器，也没有加密本地数据库：同机用户或进程的文件权限仍需由操作系统管理，不应通过端口转发或隧道公开服务。
+
+`make test` 依次执行 TypeScript 严格类型检查、前端生产构建、Python 测试与前端测试。也可单独运行 `make check-ui`、`make build-ui`、`make test-python`、`make test-ui`；HTTP 静态资源测试需要先完成前端构建。浏览器保存流程应在数据库副本或虚构数据上测试，不能用真实账单做试写。
+
+## 前端开发
+
+前端使用 React、TypeScript 和 Vite，源码位于 `frontend/src/`。启用 `strict`、`noUncheckedIndexedAccess` 和 `exactOptionalPropertyTypes`；接口响应通过 Zod 在运行时校验，金额通过整数分传给后端。`make check-ui` 使用真正的 `tsc --noEmit`，不是只把 TypeScript 转译成 JavaScript；`make build-ui` 也会先进行同样的检查。
+
+```sh
+make install-ui  # 使用 package-lock.json 固定依赖
+make build-ui
+make serve DATABASE=data/accounting.sqlite3 PORT=8777
+```
+
+开发时另开终端运行 `make dev-ui`，监听源码并重新构建，再刷新浏览器查看；它不是 Vite HMR 开发服务器。所有界面和 API 仍由 Python 同源提供，保留本机访问与写入令牌校验，无需放宽 Origin 或 CSP。
+
+构建产物位于 `accounting/static/dist/`，由 Git 忽略。前端未构建时服务会提示运行 `make build-ui`。部署到另一台机器需重新构建；如打包 Python wheel，先构建前端再打包，静态产物会随包附带。日常运行已构建的界面不需要 Node.js，也没有 CDN 或外部字体请求。
+
+组件分工：`App.tsx` 管理导航与异步请求；`BillList.tsx` 管理列表和筛选；`ReviewPanel.tsx` 管理编辑草稿；`CategoryDialog.tsx` 管理分类；`shared.tsx` 展示原始来源和审计历史。`models.ts` 定义共享类型及响应校验，`api.ts` 负责本地接口边界，`format.ts` 处理金额与日期。测试只使用明确编造的数据。
 
 `INPUT_DIR` 是账单文件夹；导入其顶层全部 `.csv`、`.xlsx` 和 `.pdf`，不递归扫描。数据库首次运行自动创建。也可以用 `make test PYTHON=/absolute/path/to/python3` 指定解释器。
 
@@ -82,9 +116,9 @@ data/
 
 1. 基于已导入来源建立跨平台关联和退款、垫付关系，保留证据并提示歧义。
 2. 完成逐笔消费性质及分类核对，保护人工确认结果。
-3. 实现逐笔核对、使用日期填写、分类管理和修改历史 UI。
+3. 增加软删除/恢复、跨平台关联和历史撤销的 UI 操作。
 4. 实现按使用日期聚合的月度生活视图。
 
-后端导入目前使用 Python 和 SQLite；前端技术栈和 AI 集成方式尚未确定。本地数据库不等同于模型必须离线运行；以后如接入远程模型，发送账单前需要另行确认数据边界。
+后端使用 Python、SQLite 和标准库 HTTP 服务，前端使用 React + TypeScript + Vite，沿用现有页面设计，不依赖外部资源。AI 集成方式尚未确定；本地数据库不等同于模型必须离线运行，以后如接入远程模型，发送账单前需要另行确认数据边界。
 
 所有源代码和文档修改均需本人 review 并明确同意后才能 commit；push 也需要明确授权。导入数据或修改代码本身不代表允许提交。
