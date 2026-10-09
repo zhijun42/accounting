@@ -39,6 +39,8 @@
 .idea/
 node_modules/
 dist/
+build/
+*.egg-info/
 coverage/
 .venv/
 __pycache__/

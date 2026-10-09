@@ -1,6 +1,6 @@
 # 数据库 schema spec
 
-状态：首版设计（v0.1），用于后续实现和审查；本文不是已执行的数据库迁移。
+状态：v0.2，本地导入阶段。已实现九张表的首版迁移、约束、审计和导入命令；UI、跨平台自动关联及消费分类尚未实现。可执行定义见 [schema.sql](../accounting/schema.sql)，审计及事务协议见 [database.py](../accounting/database.py)。
 
 ## 1. 目标与已确定的边界
 
@@ -19,10 +19,8 @@
 
 ```mermaid
 erDiagram
-    accounts ||--o{ import_files : owns
     accounts ||--o{ raw_records : scopes
-    import_files ||--o{ import_rows : contains
-    raw_records ||--o{ import_rows : appears_in
+    change_batches ||--o{ raw_records : imports
     raw_records ||--o| bill_sources : confirms
     bills ||--o{ bill_sources : explains
     categories o|--o{ categories : parents
@@ -37,9 +35,7 @@ erDiagram
 | 表 | 职责 |
 | --- | --- |
 | `accounts` | 来源账户及资金账户的本地标识 |
-| `import_files` | 导入文件、哈希、解析版本和校验结果 |
 | `raw_records` | 不可变的来源记录快照 |
-| `import_rows` | 快照在各文件中的出现位置，保留重叠导出的来源 |
 | `categories` | 两级可自定义消费分类 |
 | `bills` | 统一事件、日期、个人承担额、分类和处理状态 |
 | `bill_sources` | 已确认的来源关联，避免跨平台重复计算 |
@@ -85,28 +81,7 @@ erDiagram
 
 同一来源账户的标识在有值时唯一：`UNIQUE(provider, external_ref) WHERE external_ref IS NOT NULL`。空白标识存 NULL。账户停用不删除历史；付款方式中的优惠券或补贴不是单独的本人资金账户。
 
-### 4.2 import_files
-
-| 字段 | 类型 | 含义 |
-| --- | --- | --- |
-| `id` | TEXT PK | 导入 ID |
-| `account_id` | TEXT FK | → accounts |
-| `local_path` | TEXT | 原始文件的本机位置 |
-| `file_sha256` | TEXT | 原始文件字节的 SHA-256 |
-| `file_size_bytes` | INTEGER | 文件大小 |
-| `format` | TEXT | `csv / xlsx / pdf` |
-| `parser_name`、`parser_version` | TEXT | 解析器及版本 |
-| `declared_period_start`、`declared_period_end` | TEXT? | 文件声明的本地起止日期，保留其原意 |
-| `validation_status` | TEXT | `passed / needs_review` |
-| `validation_json` | JSON | 来源笔数、金额合计、逐页校验、警告及端点含义 |
-| `change_batch_id` | TEXT FK | → change_batches；此次导入 |
-| `imported_at` | TEXT | 导入时间 |
-
-唯一键为 `(account_id, file_sha256, parser_name, parser_version)`。相同文件和解析版本的重试返回已有结果；新版解析器可重新解析，但不得重复创建已存在的经济事件或覆盖人工结果。
-
-完整解析结果在事务中发布，发布后不可原地修改。致命解析失败不提交部分账单；有可定位的问题时可以保存完整原始记录并标记 needs_review。文件日历端点不能仅由文件名猜测，尤其不能把声明截止日期当天的真实记录丢弃。
-
-### 4.3 raw_records
+### 4.2 raw_records
 
 | 字段 | 类型 | 含义 |
 | --- | --- | --- |
@@ -124,28 +99,22 @@ erDiagram
 | `description`、`counterparty` | TEXT? | 来源商品说明、对方名称 |
 | `original_status` | TEXT? | 来源状态原文 |
 | `raw_payload_json` | JSON | 完整来源字段和值，不做覆盖修正 |
+| `source_filename` | TEXT | 首次发现此快照的文件名 |
+| `source_file_sha256` | TEXT | 该原文件字节的 SHA-256 |
+| `source_locator_json` | JSON | CSV 起止行、XLSX sheet/行，或 PDF 页/行 |
+| `parser_version` | TEXT | 解析版本 |
+| `import_batch_id` | TEXT FK | → change_batches；首次导入批次 |
 | `created_at` | TEXT | 首次发现时间 |
 
 唯一键为 `(account_id, source_event_key, snapshot_sha256)`。同一事件有不同状态或载荷时保存多个不可变快照，不能把新快照当作新消费。
 
-载荷须保留原始列顺序、重复或空列名及原值，例如保存 `headers` 与 `values` 数组；不能因 JSON 对象键重名而丢列。PDF 载荷保留抽取的原始单元格，原文件仍由 import_files 的哈希定位。
+载荷须保留原始列顺序、重复或空列名及原值，例如保存 `headers` 与 `values` 数组；不能因 JSON 对象键重名而丢列。PDF 载荷保留抽取的原始单元格，由 source_filename、source_file_sha256 与 source_locator_json 追溯原文件。snapshot_sha256 覆盖载荷和解析版本，允许修复解析器后保留新快照。
+
+不再建立 import_files 或 import_rows。完全重复的快照仅保留首次来源位置；后续文件中的重复出现计入本地导入报告，不额外建立来源行关联。每次报告保存各文件哈希、行数、校验细节、新增及跳过数量，位于忽略目录 data/，不进入公开仓库。
 
 原始快照只允许新增，不允许 UPDATE 或普通 DELETE；重新解析、AI 修正及人工修正都不能改写它。
 
-### 4.4 import_rows
-
-| 字段 | 类型 | 含义 |
-| --- | --- | --- |
-| `id` | TEXT PK | 出现记录 ID |
-| `import_file_id` | TEXT FK | → import_files |
-| `raw_record_id` | TEXT FK | → raw_records |
-| `locator_key` | TEXT | 规范化的位置键 |
-| `locator_json` | JSON | CSV 行号、XLSX sheet/行号，或 PDF 页/行/边界框 |
-| `created_at` | TEXT | 记录时间 |
-
-`UNIQUE(import_file_id, locator_key)`。一条来源快照可在多个重叠文件里出现，但每次出现的位置都保留。此表也是不可变的。
-
-### 4.5 categories
+### 4.3 categories
 
 | 字段 | 类型 | 含义 |
 | --- | --- | --- |
@@ -163,7 +132,7 @@ erDiagram
 
 停用分类不破坏历史引用。被引用的分类只能停用，或在同一有审计的事务中迁移引用后删除。AI 可选择现有分类，新增或调整分类树由本人决定。改名、调整父节点、合并及停用都留审计记录。
 
-### 4.6 bills
+### 4.4 bills
 
 | 字段 | 类型 | 含义 |
 | --- | --- | --- |
@@ -222,7 +191,7 @@ COALESCE(usage_date, date(paid_at, '+8 hours'))
 
 UI 的日期来源也派生为 `manual` 或 `payment_default`。这样修改支付时间时，默认日期会随之更新，而人工日期不会被覆盖。
 
-### 4.7 bill_sources
+### 4.5 bill_sources
 
 此表仅保存已经确认的关联。金额统计不对本表求和。
 
@@ -243,7 +212,7 @@ UI 的日期来源也派生为 `manual` 或 `payment_default`。这样修改支�
 
 首版不把一条合并付款复制到多个消费。遇到合单付款或一笔付款包含不同性质的组成部分，保留原记录并待核对，后续通过明确的拆分功能处理。
 
-### 4.8 bill_relations
+### 4.6 bill_relations
 
 | 字段 | 类型 | 含义 |
 | --- | --- | --- |
@@ -267,7 +236,7 @@ UI 的日期来源也派生为 `manual` 或 `payment_default`。这样修改支�
 
 跨行金额上限由数据库触发器保障，并由应用在同一事务结束前检查完整性。尚不能确定分配关系的退款、归还和还款保留为待核对，禁止猜配。相关 bill 删除或排除之前，必须显式处理会受影响的关系，并在同一批次留下记录。
 
-### 4.9 review_items
+### 4.7 review_items
 
 | 字段 | 类型 | 含义 |
 | --- | --- | --- |
@@ -288,7 +257,7 @@ bill_id 与 raw_record_id 至少一个非 NULL。候选关系只保存在建议�
 
 未填写使用日期是可筛选的 UI 状态，不强制为每笔默认日期创建待核对问题。解决或驳回问题时必须设置 resolved_batch_id，相关账单修改与关闭问题在同一事务完成。
 
-### 4.10 change_batches
+### 4.8 change_batches
 
 | 字段 | 类型 | 含义 |
 | --- | --- | --- |
@@ -304,7 +273,7 @@ bill_id 与 raw_record_id 至少一个非 NULL。候选关系只保存在建议�
 
 批次理由可以描述任务，但不能代替逐笔修改理由。不同账单的分类修正必须分别留下证据。
 
-### 4.11 updates
+### 4.9 updates
 
 | 字段 | 类型 | 含义 |
 | --- | --- | --- |
@@ -327,7 +296,7 @@ updates 只允许触发器追加，不允许普通 UPDATE 或 DELETE。它记录
 
 ### 同源去重
 
-1. 文件级比较原始字节哈希与解析版本。
+1. 文件字节哈希用于追溯，不依赖独立文件表去重。每次先完整解析及校验，再通过来源账户、事件身份与快照哈希去重。
 2. 可靠来源事件 ID 必须带来源账户范围和事件类型，不能把消费和退款因共享订单号而合并。商家订单号不等于全局唯一支付事件。
 3. 若来源没有可靠事件 ID，使用时间精度、方向、金额、对方、描述、可用余额等构成来源指纹。相同指纹的多次出现按多重集合对齐，不能用“同金额同时间”直接消除真实的重复购买。
 4. 银行的序号、行号或 PDF 页码不能直接当跨文件稳定交易 ID。不能可靠对齐时保留原记录并进入 duplicate 核对。
@@ -368,7 +337,7 @@ personal_base_cents 表示退款前的本人份额。正常个人消费默认全
 
 归还垫付不再从本人净消费减一次。退款、归还的实际到账日期保留，但生活消费调整归属于原消费的 effective_usage_date；现金流发生日期仍是退款或归还自身的 paid_at。
 
-下面是查询设计，可在迁移实现上述表后使用。此查询仅返回已确认消费，不能被 UI 当作“所有数据已完整核对”的证明。
+下面查询已由迁移中的 personal_expenses 视图实现同等口径。此查询仅返回已确认消费，不能被 UI 当作“所有数据已完整核对”的证明。
 
 ```sql
 WITH personal_refunds AS (
@@ -410,7 +379,7 @@ WHERE effective_usage_date >= '2026-01-01'
 
 ## 7. AI 修改与审计写入协议
 
-所有可变业务表（accounts、categories、bills、bill_sources、bill_relations、review_items）的新增、实际修改和删除均通过常驻数据库触发器记录。import_files、raw_records、import_rows 以不可变来源及导入批次追溯，不覆盖历史。
+所有可变业务表（accounts、categories、bills、bill_sources、bill_relations、review_items）的新增、实际修改和删除均通过常驻数据库触发器记录。raw_records 以不可变来源、内嵌文件定位及导入批次追溯，不覆盖历史。
 
 写入协议：
 
@@ -421,7 +390,7 @@ WHERE effective_usage_date >= '2026-01-01'
 5. 成功提交或失败回滚后，在 finally 中清空连接上下文。连接池复用不得继承前一操作的身份或理由。
 6. AI 操作须验证分类锁、建议生成时的版本、来源证据和允许修改的字段。使用日期由用户填写，AI 不得修改；审计不能代替这些业务约束。
 
-审计通过数据库触发器实现；理由和证据由应用明确提供，SQLite 不负责推断操作者或理由。最终迁移必须覆盖完整业务快照和所有上述表；不能只实现 category_id 的单字段日志就声称支持全面审计。
+审计通过数据库触发器实现；理由和证据由应用明确提供，SQLite 不负责推断操作者或理由。当前迁移为上述六张可变业务表生成完整行快照，并保留分类名称和路径；不只记录 category_id。
 
 撤销创建新的 change_batch，并以新操作记录反向变化，不改写旧日志。撤销前比较当前对象是否仍等于目标批次的修改后状态；存在后续变化时交由本人核对，不能用整行旧快照覆盖后来的修改。
 
@@ -443,21 +412,32 @@ WHERE effective_usage_date >= '2026-01-01'
 建议索引：
 
 - raw_records：来源唯一键，以及 `(account_id, transaction_id)`、`(account_id, merchant_order_id)`、`(amount_cents, occurred_at)`。
-- import_rows：`(raw_record_id)`；文件位置唯一键。
 - bills：`(paid_at)`、`(usage_date)`、`(category_id)`，及按未删除、included、性质和 review_status 的筛选索引。
 - bill_sources：raw_record_id 唯一索引，`(bill_id)`；`UNIQUE(bill_id) WHERE is_primary = 1`。
 - bill_relations：关系唯一键，`(origin_bill_id, relation_type)` 和 `(related_bill_id, relation_type)`。
 - review_items：按 open 状态、topic、bill_id/raw_record_id 的索引。
 - updates：`(entity_table, entity_id, id)`、`(batch_id, id)`。
 
-迁移版本使用 SQLite `PRAGMA user_version` 顺序推进。迁移及触发器定义需要经过合成数据验证；升级前备份数据库。本文的字段与约束为后续迁移的规范，不代表运行库已经存在。
+迁移版本使用 SQLite `PRAGMA user_version` 顺序推进，当前为 1。迁移、触发器和导入去重以合成数据验证；升级前备份数据库。实际定义以 schema.sql 与 database.py 为准。
+
+### 当前导入阶段的处理边界
+
+- 一次命令先解析和校验全部输入文件，再在一个事务中写入九张表。任一文件无法可靠解析时整次导入失败，不静默跳过坏行。
+- 原始外部交易 ID 用于同源事件身份；订单号另行保存，不当作全局交易 ID。事件键区分付款和退款。银行无可靠流水号时使用包含完整原始行的指纹和文件内出现序数。
+- 每个尚未关联的来源事件创建 pending bill 和待核对事项；这不是已经确认的独立消费。跨平台同一消费可能暂有多个 pending bill，因此不得对它们直接求和。
+- 平台原分类保留在 raw_records，并通过 bill_details 视图展示；导入器不把它当作已校正分类。23 个非兜底大类初始化供后续人工/AI 分类使用。
+- usage_date 始终初始化为 NULL，默认展示支付日期。导入或重新导入不会填写使用日期、覆盖人工修改或复活软删除。
+- 同一事件的新快照关联已有 bill，不改写其业务字段，并新增核对问题；完全重复的快照直接跳过。
+- 支付宝导出可能声明退款后的净支出，而明细保存原始支出。报告同时保留原始合计比较及“支出明细减退款成功记录”的对齐结果；这不等于已经逐笔确认退款关联。
+- 微信 XLSX 缺少账户身份时使用显式 profile（默认 personal）；不同微信或美团账户必须指定不同 profile，不能假定 ID 跨账户唯一。
+- 当前 PDF 解析器支持已核验的工行文本表格模板，不支持扫描件或未知版式。页笔数、收支金额及余额连续性必须全部通过。
 
 ## 10. 验收案例（均为编造示例）
 
 | 场景 | 期望结果 |
 | --- | --- |
 | 同一 12 元订单出现于美团、微信和银行 | 一个 expense，三份来源证据，本人消费 12 元 |
-| 相同文件重复导入、相邻月份文件边界重复 | 不增加 bill 或消费金额，来源位置仍可追溯 |
+| 相同文件重复导入、相邻月份文件边界重复 | 不增加 bill 或消费金额；数据库保留首次来源位置，后续重复出现计入本地导入报告 |
 | 同金额同分钟的两次真实购买 | 不能强行合并；缺少证据则待核对 |
 | 同一支付出现新状态快照 | 增加来源快照，不新增消费，不覆盖人工结果 |
 | 八月支付 300 元、本人填写十月使用日期 | 不计入一至九月生活消费，付款时间仍为八月 |
