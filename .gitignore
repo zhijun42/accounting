@@ -1,0 +1,45 @@
+# Private financial files, including exports currently beside this file.
+*.csv
+*.tsv
+*.xls
+*.xlsx
+*.pdf
+*.ofx
+*.qfx
+*.qif
+
+# Local data, derived artifacts, reports, and backups.
+/data/
+/private/
+/local/
+/imports/
+/exports/
+/backups/
+/tmp/
+/output/
+/outputs/
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
+*.sqlite3
+*.sqlite3-*
+*.wal
+*.shm
+*.journal
+*.log
+*.bak
+*.local.json
+
+# Local configuration and development artifacts.
+.env
+.env.*
+!.env.example
+.DS_Store
+.idea/
+node_modules/
+dist/
+coverage/
+.venv/
+__pycache__/
+*.pyc
