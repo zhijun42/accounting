@@ -1,9 +1,28 @@
 import { describe, expect, it } from "vitest";
 import { dateRange } from "../api";
-import { categorySelection, dateText, parseMoney } from "../format";
+import {
+  categorySelection,
+  dateText,
+  parseMoney,
+  reviewLabel,
+} from "../format";
 import { categories } from "./fixtures";
 
 describe("money and local dates", () => {
+  it("does not confuse an AI check with confirmation", () => {
+    expect(reviewLabel({ review_status: "pending", ai_reviewed: true })).toBe(
+      "AI已检查待核对",
+    );
+    expect(reviewLabel({ review_status: "pending", ai_reviewed: false })).toBe(
+      "AI未检查待核对",
+    );
+    expect(
+      reviewLabel({ review_status: "user_confirmed", ai_reviewed: true }),
+    ).toBe("本人已确认");
+    expect(
+      reviewLabel({ review_status: "auto_confirmed", ai_reviewed: true }),
+    ).toBe("AI 已确认");
+  });
   it("converts decimal text to integer cents without floating point rounding", () => {
     expect(parseMoney("0.29")).toBe(29);
     expect(parseMoney(" 12.1 ")).toBe(1210);
@@ -19,7 +38,7 @@ describe("money and local dates", () => {
   it("uses Shanghai date boundaries and real calendar month lengths", () => {
     expect(dateText("2026-01-31T17:00:00Z")).toContain("2026/02/01");
     expect(dateRange("02")).toEqual(["2026-02-01", "2026-02-28"]);
-    expect(dateRange("scope")).toEqual(["2026-01-01", "2026-09-30"]);
+    expect(dateRange("scope")).toEqual(["2026-04-01", "2026-09-30"]);
     expect(() => dateRange("13")).toThrow();
   });
   it("resolves root and optional child categories", () => {

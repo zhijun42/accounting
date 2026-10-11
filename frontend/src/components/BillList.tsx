@@ -1,11 +1,19 @@
 import { useState } from "react";
-import { count, dateText, kinds, money, providers, reviews } from "../format";
+import {
+  count,
+  dateText,
+  kinds,
+  money,
+  providers,
+  reviewLabel,
+} from "../format";
 import type { BillList as List, Filters } from "../models";
 import { Options, SourcePill } from "./shared";
 
 export const statuses = {
   all: "全部记录",
-  pending: "待核对",
+  ai_reviewed_pending: "AI已检查待核对",
+  ai_unreviewed_pending: "AI未检查待核对",
   confirmed: "已确认",
 };
 type Props = {
@@ -83,7 +91,7 @@ export function BillList({
             onFilter({ ...filters, period: event.target.value, page: 1 })
           }
         >
-          <option value="scope">2026 年 1—9 月</option>
+          <option value="scope">2026 年 4—9 月</option>
           <option value="all">2026 年全部日期</option>
           {Array.from({ length: 12 }, (_, index) => (
             <option key={index} value={String(index + 1).padStart(2, "0")}>
@@ -192,9 +200,9 @@ export function BillList({
                         {category}
                       </span>
                       <span
-                        className={`status-dot${bill.review_status === "pending" ? "" : " confirmed"}`}
+                        className={`status-dot${bill.review_status !== "pending" ? " confirmed" : bill.ai_reviewed ? " ai-reviewed" : ""}`}
                       >
-                        {reviews[bill.review_status]}
+                        {reviewLabel(bill)}
                       </span>
                     </td>
                     <td
@@ -273,7 +281,10 @@ export function Summary({ list }: { list: List | null }) {
           <div className="stat-number">
             {summary ? count(summary.pending) : "—"}
           </div>
-          <small>从一笔开始，不必一次完成</small>
+          <small>
+            AI已检查 {summary ? count(summary.ai_reviewed_pending) : "—"} ·
+            AI未检查 {summary ? count(summary.ai_unreviewed_pending) : "—"}
+          </small>
         </article>
         <article className="stat-card progress-card">
           <div className="stat-label">

@@ -37,6 +37,7 @@ export const billSchema = z.object({
   category_id: text,
   personal_base_cents: integer.nonnegative().nullable(),
   review_status: z.enum(["pending", "auto_confirmed", "user_confirmed"]),
+  ai_reviewed: z.boolean(),
   classification_locked: z.union([z.literal(0), z.literal(1)]),
   inclusion_status: inclusionSchema,
   exclusion_reason: text,
@@ -75,7 +76,9 @@ export const detailSchema = z.object({
   bill: billSchema,
   sources: z.array(sourceSchema),
   history: z.array(auditSchema),
-  review_items: z.array(z.object({ id: z.string() })),
+  review_items: z.array(
+    z.object({ id: z.string(), topic: z.string(), reason: z.string() }),
+  ),
 });
 export const listSchema = z.object({
   items: z.array(
@@ -87,6 +90,8 @@ export const listSchema = z.object({
   summary: z.object({
     total: integer.nonnegative(),
     pending: integer.nonnegative(),
+    ai_reviewed_pending: integer.nonnegative(),
+    ai_unreviewed_pending: integer.nonnegative(),
     confirmed: integer.nonnegative(),
     categorized: integer.nonnegative(),
   }),
@@ -112,7 +117,8 @@ export type Detail = z.infer<typeof detailSchema>;
 export type Category = z.infer<typeof categorySchema>;
 export type Audit = z.infer<typeof auditSchema>;
 export type Source = z.infer<typeof sourceSchema>;
-export type Status = "all" | "pending" | "confirmed";
+export type Status =
+  "all" | "ai_reviewed_pending" | "ai_unreviewed_pending" | "confirmed";
 export type View = "bills" | "categories" | "history";
 export type Filters = {
   status: Status;

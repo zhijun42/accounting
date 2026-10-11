@@ -39,6 +39,15 @@ export const reviews: Record<Bill["review_status"], string> = {
   auto_confirmed: "AI 已确认",
   user_confirmed: "本人已确认",
 };
+export function reviewLabel(
+  bill: Pick<Bill, "review_status" | "ai_reviewed">,
+): string {
+  return bill.review_status === "pending"
+    ? bill.ai_reviewed
+      ? "AI已检查待核对"
+      : "AI未检查待核对"
+    : reviews[bill.review_status];
+}
 export const count = (value: number) =>
   new Intl.NumberFormat("zh-CN").format(value);
 export const money = (cents: number) =>

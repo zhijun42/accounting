@@ -1,6 +1,6 @@
 import { expect, it, vi } from "vitest";
 import { api, APIError } from "../api";
-import { bill, detailFor } from "./fixtures";
+import { bill, detailFor, listFor } from "./fixtures";
 
 it("rejects successful HTTP responses that do not satisfy runtime types", async () => {
   vi.stubGlobal(
@@ -14,6 +14,32 @@ it("rejects successful HTTP responses that do not satisfy runtime types", async 
       ),
   );
   await expect(api.session()).rejects.toThrow("接口数据与界面类型不一致");
+});
+it("sends the explicit AI pending filter and validates AI review booleans", async () => {
+  const fetch = vi
+    .fn()
+    .mockResolvedValueOnce(new Response(JSON.stringify(listFor())))
+    .mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          ...detailFor(),
+          bill: { ...bill, ai_reviewed: "yes" },
+        }),
+      ),
+    );
+  vi.stubGlobal("fetch", fetch);
+  await api.list({
+    status: "ai_reviewed_pending",
+    period: "scope",
+    provider: "all",
+    kind: "all",
+    q: "",
+    page: 1,
+  });
+  expect(String(fetch.mock.calls[0]?.[0])).toContain(
+    "status=ai_reviewed_pending",
+  );
+  await expect(api.detail(bill.id)).rejects.toThrow("接口数据与界面类型不一致");
 });
 it("rejects unsafe integer amounts instead of trusting JSON", async () => {
   vi.stubGlobal(

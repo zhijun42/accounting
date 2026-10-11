@@ -19,6 +19,68 @@ beforeEach(() => {
     ),
   );
 });
+it("filters reviewed and unreviewed pending bills with independent counts and labels", async () => {
+  const user = userEvent.setup();
+  const checked = { ...bill, ai_reviewed: true };
+  const unchecked = {
+    ...bill,
+    id: "fictional-unchecked",
+    description: "虚构未检查",
+  };
+  const full = listFor([checked, unchecked]);
+  vi.mocked(api.list).mockImplementation(async (filters) => {
+    const items =
+      filters.status === "ai_reviewed_pending"
+        ? [checked]
+        : filters.status === "ai_unreviewed_pending"
+          ? [unchecked]
+          : [checked, unchecked];
+    return { ...full, items: listFor(items).items, total: items.length };
+  });
+  vi.mocked(api.detail).mockImplementation(async (id) =>
+    detailFor(id === checked.id ? checked : unchecked),
+  );
+  render(<App />);
+  await screen.findByLabelText("资金性质");
+  const checkedButton = screen.getByRole("button", {
+    name: "AI已检查待核对",
+  });
+  const uncheckedButton = screen.getByRole("button", {
+    name: "AI未检查待核对",
+  });
+  expect(checkedButton).toHaveTextContent("1");
+  expect(uncheckedButton).toHaveTextContent("1");
+  await user.click(checkedButton);
+  await waitFor(() =>
+    expect(screen.queryByRole("row", { name: /虚构未检查/ })).toBeNull(),
+  );
+  expect(api.list).toHaveBeenLastCalledWith(
+    expect.objectContaining({ status: "ai_reviewed_pending", page: 1 }),
+  );
+  expect(
+    screen.getByRole("complementary", { name: "逐笔核对" }),
+  ).toHaveTextContent("AI已检查待核对");
+  await user.click(uncheckedButton);
+  expect(
+    await screen.findByRole("row", { name: /虚构未检查/ }),
+  ).toHaveTextContent("AI未检查待核对");
+  expect(api.list).toHaveBeenLastCalledWith(
+    expect.objectContaining({ status: "ai_unreviewed_pending", page: 1 }),
+  );
+});
+it("keeps unsaved edits when switching AI review status is declined", async () => {
+  const user = userEvent.setup();
+  const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
+  render(<App />);
+  await user.type(
+    await screen.findByLabelText("给这笔记录留个备注"),
+    "不要丢弃",
+  );
+  await user.click(screen.getByRole("button", { name: "AI已检查待核对" }));
+  expect(confirm).toHaveBeenCalled();
+  expect(api.list).toHaveBeenCalledTimes(1);
+  expect(screen.getByLabelText("给这笔记录留个备注")).toHaveValue("不要丢弃");
+});
 it("requires discard approval before changing filters or leaving a dirty bill", async () => {
   const user = userEvent.setup();
   const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);

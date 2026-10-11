@@ -143,11 +143,18 @@ textarea:focus {
   font-size: 18px;
   line-height: 1;
   width: 18px;
+  flex-shrink: 0;
+}
+.nav-text {
+  flex: 1;
+  min-width: 0;
+  line-height: 1.5;
 }
 .nav-item small {
   margin-left: auto;
   font-size: 10px;
   font-variant-numeric: tabular-nums;
+  flex-shrink: 0;
 }
 .nav-item.active {
   background: #e9f0e7;
@@ -556,6 +563,9 @@ td:last-child {
 }
 .status-dot.confirmed {
   color: #7ba27c;
+}
+.status-dot.ai-reviewed {
+  color: #648c94;
 }
 .amount-cell {
   text-align: right;
@@ -1094,6 +1104,7 @@ dialog::backdrop {
   }
   .brand > span:last-child,
   .nav-label,
+  .nav-text,
   .nav-item small,
   .sidebar-note,
   .sidebar-footer {

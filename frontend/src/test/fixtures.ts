@@ -20,6 +20,7 @@ export const bill: Bill = {
   category_id: null,
   personal_base_cents: null,
   review_status: "pending",
+  ai_reviewed: false,
   classification_locked: 0,
   inclusion_status: "included",
   exclusion_reason: null,
@@ -34,7 +35,9 @@ export function detailFor(value = bill): Detail {
     bill: value,
     sources: [],
     history: [],
-    review_items: [{ id: "fictional-review" }],
+    review_items: [
+      { id: "fictional-review", topic: "category", reason: "虚构分类待核对" },
+    ],
   };
 }
 export function listFor(
@@ -54,9 +57,16 @@ export function listFor(
     page_size: 50,
     summary: {
       total: items.length,
-      pending: items.length,
-      confirmed: 0,
-      categorized: 0,
+      pending: items.filter((item) => item.review_status === "pending").length,
+      ai_reviewed_pending: items.filter(
+        (item) => item.review_status === "pending" && item.ai_reviewed,
+      ).length,
+      ai_unreviewed_pending: items.filter(
+        (item) => item.review_status === "pending" && !item.ai_reviewed,
+      ).length,
+      confirmed: items.filter((item) => item.review_status !== "pending")
+        .length,
+      categorized: items.filter((item) => item.category_id !== null).length,
     },
   };
 }

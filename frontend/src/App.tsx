@@ -249,13 +249,17 @@ export function App() {
           }}
         >
           <span className="brand-mark">账</span>
-          <span>
-            生活账本<small>把账目，还给生活。</small>
-          </span>
         </a>
         <div className="nav-label">我的账本</div>
         <nav aria-label="主导航">
-          {(["all", "pending", "confirmed"] as const).map((status, index) => (
+          {(
+            [
+              "all",
+              "ai_reviewed_pending",
+              "ai_unreviewed_pending",
+              "confirmed",
+            ] as const
+          ).map((status, index) => (
             <button
               key={status}
               className={`nav-item${view === "bills" && filters.status === status ? " active" : ""}`}
@@ -263,8 +267,24 @@ export function App() {
               disabled={saving}
               onClick={() => void navigate("bills", status)}
             >
-              <span>{["▤", "◷", "✓"][index]}</span>
-              {statuses[status]}
+              <span>{["▤", "◉", "◷", "✓"][index]}</span>
+              <div className="nav-text">
+                {status === "ai_reviewed_pending" ? (
+                  <>
+                    AI已检查
+                    <br />
+                    待核对
+                  </>
+                ) : status === "ai_unreviewed_pending" ? (
+                  <>
+                    AI未检查
+                    <br />
+                    待核对
+                  </>
+                ) : (
+                  statuses[status]
+                )}
+              </div>
               <small>
                 {summary
                   ? count(summary[status === "all" ? "total" : status])
@@ -288,19 +308,6 @@ export function App() {
             <span>↶</span>修改记录
           </button>
         </nav>
-        <div className="sidebar-note">
-          <span className="local-dot" />
-          只在这台设备上
-          <br />
-          <small>
-            SQLite 本地存储
-            <br />
-            每一次修改，都有迹可循。
-          </small>
-        </div>
-        <div className="sidebar-footer">
-          PERSONAL LEDGER <span>01</span>
-        </div>
       </aside>
       <main className="workspace">
         <header className="page-header">
@@ -311,10 +318,6 @@ export function App() {
               <span>。</span>
             </h1>
             <p>{subtitle}</p>
-          </div>
-          <div className="local-badge">
-            <span className="local-dot" />
-            本地运行 <span className="badge-separator">/</span> 数据不上传
           </div>
         </header>
         {view === "bills" && (

@@ -20,6 +20,14 @@ function props() {
     onAddCategory: vi.fn(),
   };
 }
+it("shows unresolved AI questions without presenting them as confirmation", () => {
+  const input = props();
+  render(<ReviewPanel {...input} />);
+  expect(
+    screen.getByRole("region", { name: "需要本人核对" }),
+  ).toHaveTextContent("虚构分类待核对");
+  expect(screen.getByLabelText("资金性质")).toHaveValue("pending");
+});
 it("saves user date, child category and integer share without confirming a draft", async () => {
   const user = userEvent.setup();
   const input = props();

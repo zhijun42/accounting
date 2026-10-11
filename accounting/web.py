@@ -16,6 +16,23 @@ from .ingest import insert
 KINDS = {"pending", "expense", "income", "refund", "reimbursement", "internal_transfer", "debt_repayment", "investment"}
 PROVIDERS = {"alipay", "wechat", "meituan", "icbc", "manual"}
 
+# A decision can leave every bill field unchanged, so edits alone do not prove an AI review.
+REVIEWED_BILLS = """
+    WITH ai_checks AS (
+        SELECT DISTINCT json_extract(u.after_json, '$.bill_id') AS bill_id
+        FROM updates u JOIN change_batches b ON b.id = u.batch_id
+        WHERE b.actor_type = 'ai' AND u.entity_table = 'review_items' AND u.operation = 'insert'
+          AND json_extract(u.after_json, '$.topic') IN ('nature', 'category')
+    ), reviewed_bills AS (
+        SELECT d.*, a.bill_id IS NOT NULL AS ai_reviewed
+        FROM bill_details d LEFT JOIN ai_checks a ON a.bill_id = d.id
+    )
+"""
+
+
+def bill_json(row):
+    return {**dict(row), "ai_reviewed": bool(row["ai_reviewed"])}
+
 
 class APIError(Exception):
     def __init__(self, status, message):
@@ -46,7 +63,7 @@ def category_rows(connection):
 
 
 def filters(parameters):
-    start = parameters.get("start", "2026-01-01")
+    start = parameters.get("start", "2026-04-01")
     end = parameters.get("end", "2026-09-30")
     if not start or not end or not Database.valid_usage_date(start) or not Database.valid_usage_date(end) or start > end:
         raise APIError(400, "请选择有效的起止日期")
@@ -58,6 +75,12 @@ def filters(parameters):
             raise APIError(400, "来源平台不合法")
         clauses.append("d.source_provider = ?")
         values.append(provider)
+    kind = parameters.get("kind", "all")
+    if kind != "all":
+        if kind not in KINDS:
+            raise APIError(400, "资金性质不合法")
+        clauses.append("d.kind = ?")
+        values.append(kind)
     query = parameters.get("q", "").strip()
     if len(query) > 200:
         raise APIError(400, "搜索内容过长")
@@ -71,39 +94,39 @@ def filters(parameters):
 def list_bills(connection, parameters):
     clauses, values = filters(parameters)
     base = " AND ".join(clauses)
-    summary = dict(connection.execute(f"""
+    summary = dict(connection.execute(REVIEWED_BILLS + f"""
         SELECT COUNT(*) total,
             COALESCE(SUM(review_status = 'pending'),0) pending,
+            COALESCE(SUM(review_status = 'pending' AND ai_reviewed = 1),0) ai_reviewed_pending,
+            COALESCE(SUM(review_status = 'pending' AND ai_reviewed = 0),0) ai_unreviewed_pending,
             COALESCE(SUM(review_status != 'pending'),0) confirmed,
             COALESCE(SUM(category_id IS NOT NULL),0) categorized
-        FROM bill_details d WHERE {base}
+        FROM reviewed_bills d WHERE {base}
     """, values).fetchone())
     status = parameters.get("status", "all")
     if status == "pending":
         clauses.append("d.review_status = 'pending'")
+    elif status in {"ai_reviewed_pending", "ai_unreviewed_pending"}:
+        clauses.append("d.review_status = 'pending'")
+        clauses.append("d.ai_reviewed = ?")
+        values.append(int(status == "ai_reviewed_pending"))
     elif status == "confirmed":
         clauses.append("d.review_status != 'pending'")
     elif status != "all":
         raise APIError(400, "核对状态不合法")
-    kind = parameters.get("kind", "all")
-    if kind != "all":
-        if kind not in KINDS:
-            raise APIError(400, "资金性质不合法")
-        clauses.append("d.kind = ?")
-        values.append(kind)
     try:
         page = integer(int(parameters.get("page", "1")), 1, 100000, "页码")
     except ValueError as error:
         raise APIError(400, "页码不合法") from error
     where = " AND ".join(clauses)
-    total = connection.execute(f"SELECT COUNT(*) FROM bill_details d WHERE {where}", values).fetchone()[0]
-    rows = connection.execute(f"""
+    total = connection.execute(REVIEWED_BILLS + f"SELECT COUNT(*) FROM reviewed_bills d WHERE {where}", values).fetchone()[0]
+    rows = connection.execute(REVIEWED_BILLS + f"""
         SELECT d.*, c.name category_name, p.name parent_category_name
-        FROM bill_details d LEFT JOIN categories c ON c.id = d.category_id
+        FROM reviewed_bills d LEFT JOIN categories c ON c.id = d.category_id
         LEFT JOIN categories p ON p.id = c.parent_id
         WHERE {where} ORDER BY d.paid_at DESC, d.id DESC LIMIT 50 OFFSET ?
     """, [*values, (page - 1) * 50]).fetchall()
-    return {"items": [dict(row) for row in rows], "total": total, "page": page,
+    return {"items": [bill_json(row) for row in rows], "total": total, "page": page,
             "page_size": 50, "summary": summary}
 
 
@@ -124,7 +147,7 @@ def history_rows(connection, bill_id=None):
 
 
 def bill_detail(connection, bill_id):
-    row = connection.execute("SELECT * FROM bill_details WHERE id = ? AND deleted_at IS NULL", (bill_id,)).fetchone()
+    row = connection.execute(REVIEWED_BILLS + "SELECT * FROM reviewed_bills WHERE id = ? AND deleted_at IS NULL", (bill_id,)).fetchone()
     if row is None:
         raise APIError(404, "找不到这笔记录")
     sources = []
@@ -138,7 +161,7 @@ def bill_detail(connection, bill_id):
         item["payload"] = json.loads(item.pop("raw_payload_json"))
         item["locator"] = json.loads(item.pop("source_locator_json"))
         sources.append(item)
-    return {"bill": dict(row), "sources": sources,
+    return {"bill": bill_json(row), "sources": sources,
             "history": history_rows(connection, bill_id),
             "review_items": [dict(r) for r in connection.execute(
                 "SELECT * FROM review_items WHERE bill_id = ? AND status = 'open'", (bill_id,))]}

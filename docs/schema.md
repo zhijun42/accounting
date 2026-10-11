@@ -160,6 +160,8 @@ erDiagram
 | `created_at`、`updated_at` | TEXT | 时间 |
 | `revision` | INTEGER | 用于并发和建议过期检查 |
 
+核对界面将 `review_status = pending` 拆分展示为“AI已检查待核对”和“AI未检查待核对”。API 的只读派生字段 `ai_reviewed` 来自 `updates` 与 `change_batches`：存在 AI 对该账单新增 `nature` 或 `category` 类型 `review_items` 的审计记录即为已检查，不依赖是否改动账单、是否已有分类或核对问题是否仍开放。包括信息不足的判断，但不包括仅修改备注、匹配或本人操作。该字段不新增到 `bills`，不允许由界面写入；表示历史上曾检查过，不表示后续版本已重新检查。两个待核对集合互斥，合计为全部 pending；已确认和软删除记录均不进入这两个集合。消费分类、人工确认约束及个人消费统计口径保持不变。
+
 | kind | 含义 | 进入个人消费 |
 | --- | --- | --- |
 | `expense` | 商品或服务消费，含代垫及共同消费 | 仅本人承担的净额 |

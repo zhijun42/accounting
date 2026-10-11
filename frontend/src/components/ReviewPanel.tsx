@@ -8,6 +8,7 @@ import {
   money,
   parseMoney,
   payments,
+  reviewLabel,
 } from "../format";
 import {
   directionSchema,
@@ -134,13 +135,7 @@ export function ReviewPanel({
       <div className="detail-heading">
         <div>
           <h2>逐笔核对</h2>
-          <small>
-            {dirty
-              ? "未保存修改"
-              : bill.review_status === "pending"
-                ? "待核对"
-                : "本人记录"}
-          </small>
+          <small>{dirty ? "未保存修改" : reviewLabel(bill)}</small>
         </div>
         <div>
           <button
@@ -178,6 +173,18 @@ export function ReviewPanel({
           原始数据不会因下面的修改而改变。
         </div>
         <div className="form-divider" />
+        {detail.review_items.some(
+          (item) => item.topic !== "personal_share",
+        ) && (
+          <section className="source-hint" aria-label="需要本人核对">
+            <strong>需要本人核对</strong>
+            {detail.review_items
+              .filter((item) => item.topic !== "personal_share")
+              .map((item) => (
+                <p key={item.id}>{item.reason}</p>
+              ))}
+          </section>
+        )}
         <form
           className="review-form"
           onSubmit={(event) => {

@@ -12,6 +12,7 @@ import unittest
 from accounting.database import Database
 from accounting.importers import Record, Statement, finalize
 from accounting.ingest import import_statements
+from accounting.review import add_item
 from accounting.web import APIError, LocalServer, backup_database, bill_detail, create_category, list_bills, update_bill
 
 
@@ -46,6 +47,71 @@ class ReviewFixture(unittest.TestCase):
 
 
 class ReviewTests(ReviewFixture):
+    def ai_check(self, topic="nature"):
+        with self.db.batch("ai", "fictional-reviewer", "虚构逐笔判断") as batch_id:
+            add_item(self.db, self.bill_id, topic, "虚构信息不足，等待本人核对", None, [], batch_id)
+
+    def test_pending_splits_by_ai_decisions_even_without_bill_edits(self):
+        self.assertEqual(list_bills(self.db.connection, {"status": "ai_reviewed_pending"})["total"], 0)
+        self.ai_check()
+        self.ai_check("category")
+        reviewed = list_bills(self.db.connection, {"status": "ai_reviewed_pending"})
+        self.assertEqual(reviewed["total"], 1)
+        self.assertEqual(reviewed["items"][0]["id"], self.bill_id)
+        self.assertIs(reviewed["items"][0]["ai_reviewed"], True)
+        self.assertEqual(reviewed["items"][0]["kind"], "pending")
+        self.assertIsNone(reviewed["items"][0]["category_id"])
+        self.assertEqual(reviewed["summary"]["pending"], 2)
+        self.assertEqual(reviewed["summary"]["ai_reviewed_pending"], 1)
+        self.assertEqual(reviewed["summary"]["ai_unreviewed_pending"], 1)
+        unseen = list_bills(self.db.connection, {"status": "ai_unreviewed_pending"})
+        self.assertEqual(unseen["total"], 1)
+        self.assertIs(unseen["items"][0]["ai_reviewed"], False)
+        self.assertIs(bill_detail(self.db.connection, self.bill_id)["bill"]["ai_reviewed"], True)
+
+    def test_category_and_unrelated_ai_edits_do_not_imply_an_ai_check(self):
+        self.ai_check("matching")
+        with self.db.batch("ai", "fictional-helper", "虚构备注修改并非逐笔检查"):
+            self.db.connection.execute("UPDATE bills SET notes='虚构备注',revision=revision+1 WHERE id=?", (self.bill_id,))
+        result = update_bill(self.db, self.bill_id, {**self.expense(confirm=False), "revision": 2})
+        self.assertIsNotNone(result["bill"]["category_id"])
+        self.assertIs(result["bill"]["ai_reviewed"], False)
+        self.assertEqual(list_bills(self.db.connection, {"status": "ai_unreviewed_pending"})["total"], 2)
+        with self.assertRaises(APIError):
+            update_bill(self.db, self.bill_id, {"revision": 3, "ai_reviewed": True})
+
+    def test_user_confirmation_leaves_pending_but_preserves_ai_history_after_restart(self):
+        self.ai_check()
+        result = update_bill(self.db, self.bill_id, self.expense())
+        self.assertEqual(result["bill"]["review_status"], "user_confirmed")
+        self.assertIs(result["bill"]["ai_reviewed"], True)
+        self.assertFalse(result["review_items"])
+        reopened = Database(self.path, readonly=True)
+        try:
+            self.assertEqual(list_bills(reopened.connection, {"status": "ai_reviewed_pending"})["total"], 0)
+            self.assertEqual(list_bills(reopened.connection, {"status": "ai_unreviewed_pending"})["total"], 1)
+            self.assertEqual(list_bills(reopened.connection, {"status": "confirmed"})["total"], 1)
+            self.assertIs(bill_detail(reopened.connection, self.bill_id)["bill"]["ai_reviewed"], True)
+        finally:
+            reopened.close()
+
+    def test_ai_filters_compose_with_scope_search_pagination_and_soft_deletion(self):
+        self.ai_check()
+        expenses = list_bills(self.db.connection, {"status": "ai_reviewed_pending", "kind": "expense"})
+        self.assertEqual(expenses["summary"]["ai_reviewed_pending"], 0)
+        pending = list_bills(self.db.connection, {"status": "ai_reviewed_pending", "kind": "pending"})
+        self.assertEqual(pending["summary"]["ai_reviewed_pending"], 1)
+        for parameters in ({"start": "2026-09-01"}, {"provider": "wechat"}, {"q": "不存在的商户"}, {"kind": "expense"}, {"page": "2"}):
+            with self.subTest(parameters=parameters):
+                result = list_bills(self.db.connection, {"status": "ai_reviewed_pending", **parameters})
+                self.assertFalse(result["items"])
+        self.assertEqual(list_bills(self.db.connection, {"status": "ai_reviewed_pending", "q": "%"})["total"], 1)
+        with self.db.batch("user", "fictional-user", "虚构软删除"):
+            self.db.connection.execute("UPDATE bills SET deleted_at='2026-10-11T00:00:00Z',revision=revision+1 WHERE id=?", (self.bill_id,))
+        result = list_bills(self.db.connection, {"status": "ai_reviewed_pending"})
+        self.assertEqual(result["total"], 0)
+        self.assertEqual(result["summary"]["ai_reviewed_pending"], 0)
+
     def test_date_scope_and_pagination_are_explicit(self):
         scoped = list_bills(self.db.connection, {})
         self.assertEqual(scoped["total"], 2)
@@ -204,6 +270,21 @@ class HTTPTests(ReviewFixture):
         self.assertEqual(self.request("/api/categories", {"name": "其他"})[0], 422)
         self.assertEqual(self.request("/api/categories", {"name": "虚构分类"})[0], 200)
         self.assertEqual(self.request("/api/history")[0], 200)
+
+    def test_http_ai_review_filter_and_detail_agree(self):
+        with self.db.batch("ai", "fictional-reviewer", "虚构逐笔判断") as batch_id:
+            add_item(self.db, self.bill_id, "nature", "虚构用途待本人核对", None, [], batch_id)
+        status, _, body = self.request("/api/bills?status=ai_reviewed_pending")
+        self.assertEqual(status, 200)
+        data = json.loads(body)
+        self.assertEqual(data["total"], 1)
+        self.assertIs(data["items"][0]["ai_reviewed"], True)
+        status, _, body = self.request("/api/bills/" + self.bill_id)
+        self.assertEqual(status, 200)
+        self.assertIs(json.loads(body)["bill"]["ai_reviewed"], True)
+        status, _, body = self.request("/api/bills?status=ai_unreviewed_pending")
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["total"], 1)
 
 
 if __name__ == "__main__":

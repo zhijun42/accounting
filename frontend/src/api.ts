@@ -74,7 +74,7 @@ async function request<T>(
 }
 
 export function dateRange(period: string): [string, string] {
-  if (period === "scope") return ["2026-01-01", "2026-09-30"];
+  if (period === "scope") return ["2026-04-01", "2026-09-30"];
   if (period === "all") return ["2026-01-01", "2026-12-31"];
   if (!/^(0[1-9]|1[0-2])$/.test(period)) throw new Error("支付月份不合法");
   const last = new Date(Date.UTC(2026, Number(period), 0)).getUTCDate();
