@@ -8,6 +8,7 @@ import {
   reviewLabel,
 } from "../format";
 import type { BillList as List, Filters } from "../models";
+import { categoryFilterSchema } from "../models";
 import { Options, SourcePill } from "./shared";
 
 export const statuses = {
@@ -119,10 +120,37 @@ export function BillList({
           }
         >
           <option value="all">全部性质</option>
-          <Options labels={kinds} />
+          <Options
+            labels={Object.fromEntries(
+              Object.entries(kinds).filter(
+                ([kind]) => kind !== "income" && kind !== "internal_transfer",
+              ),
+            )}
+          />
+        </select>
+        <select
+          aria-label="分类筛选"
+          value={filters.category}
+          disabled={saving}
+          onChange={(event) =>
+            onFilter({
+              ...filters,
+              category: categoryFilterSchema.parse(event.target.value),
+              page: 1,
+            })
+          }
+        >
+          <option value="all">全部分类状态</option>
+          <option value="unclassified">待分类</option>
+          <option value="categorized">已分类</option>
         </select>
       </div>
-      <div className="table-scroll">
+      <div
+        className="table-scroll"
+        role="region"
+        aria-label="滚动账单记录"
+        tabIndex={0}
+      >
         <table>
           <thead>
             <tr>
@@ -254,56 +282,5 @@ export function BillList({
         </div>
       </footer>
     </section>
-  );
-}
-
-export function Summary({ list }: { list: List | null }) {
-  const summary = list?.summary;
-  const percent = summary?.total
-    ? Math.round((summary.confirmed / summary.total) * 100)
-    : 0;
-  return (
-    <>
-      <div className="stats-grid">
-        <article className="stat-card">
-          <div className="stat-label">
-            当前范围的记录 <span>↗</span>
-          </div>
-          <div className="stat-number">
-            {summary ? count(summary.total) : "—"}
-          </div>
-          <small>按支付日期筛选 · 非最终消费笔数</small>
-        </article>
-        <article className="stat-card">
-          <div className="stat-label">
-            等待你的核对 <span className="amber">◷</span>
-          </div>
-          <div className="stat-number">
-            {summary ? count(summary.pending) : "—"}
-          </div>
-          <small>
-            AI已检查 {summary ? count(summary.ai_reviewed_pending) : "—"} ·
-            AI未检查 {summary ? count(summary.ai_unreviewed_pending) : "—"}
-          </small>
-        </article>
-        <article className="stat-card progress-card">
-          <div className="stat-label">
-            已确认记录 <span className="green">✓</span>
-          </div>
-          <div className="stat-number">
-            {summary ? count(summary.confirmed) : "—"}
-            <span className="stat-percent">{percent}%</span>
-          </div>
-          <progress value={percent} max={100} aria-label="核对进度" />
-        </article>
-      </div>
-      <div className="scope-note">
-        <span className="scope-icon">i</span>
-        <p>
-          <strong>先核对，再洞察。</strong>{" "}
-          美团、支付平台和银行卡可能记录同一次消费；跨平台关联尚未完成。确认单条记录不代表已去重，本页不展示消费总额。
-        </p>
-      </div>
-    </>
   );
 }

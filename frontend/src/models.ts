@@ -22,6 +22,11 @@ export const providerSchema = z.enum([
 export const directionSchema = z.enum(["outflow", "inflow", "none"]);
 export const paymentSchema = z.enum(["settled", "pending", "voided"]);
 export const inclusionSchema = z.enum(["included", "excluded"]);
+export const categoryFilterSchema = z.enum([
+  "all",
+  "unclassified",
+  "categorized",
+]);
 export const billSchema = z.object({
   id: z.string(),
   kind: kindSchema,
@@ -125,6 +130,7 @@ export type Filters = {
   period: string;
   provider: string;
   kind: string;
+  category: z.infer<typeof categoryFilterSchema>;
   q: string;
   page: number;
 };
@@ -140,4 +146,4 @@ export type BillUpdate = Pick<
   | "notes"
   | "inclusion_status"
   | "exclusion_reason"
-> & { confirm: boolean };
+> & { description: string; confirm: boolean };

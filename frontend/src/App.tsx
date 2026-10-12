@@ -11,7 +11,7 @@ import type {
   Status,
   View,
 } from "./models";
-import { BillList, statuses, Summary } from "./components/BillList";
+import { BillList, statuses } from "./components/BillList";
 import { CategoryDialog, CategoryManager } from "./components/CategoryDialog";
 import { ReviewPanel } from "./components/ReviewPanel";
 import { History } from "./components/shared";
@@ -21,16 +21,14 @@ const initialFilters: Filters = {
   period: "scope",
   provider: "all",
   kind: "all",
+  category: "all",
   q: "",
   page: 1,
 };
 const headings: Record<View, [string, string]> = {
-  bills: ["从每一笔，认识生活", "慢慢核对，让记录更接近真实的生活。"],
-  categories: ["给生活，你自己的名字", "大类勾勒轮廓，小类记录你在意的细节。"],
-  history: [
-    "每次修正，都有迹可循",
-    "修改前后、执行者与理由，保留在本地数据库。",
-  ],
+  bills: ["账单核对", "按支付日期浏览 · 跨平台记录可能重复，核对后再统计"],
+  categories: ["分类管理", "自定义大类与小类"],
+  history: ["修改记录", "查看修改前后、执行者与理由"],
 };
 
 export function App() {
@@ -309,20 +307,17 @@ export function App() {
           </button>
         </nav>
       </aside>
-      <main className="workspace">
+      <main
+        className={`workspace${view === "bills" ? " workspace-bills" : ""}`}
+      >
         <header className="page-header">
           <div>
-            <div className="eyebrow">A LITTLE CLARITY, EVERY DAY</div>
-            <h1>
-              {title}
-              <span>。</span>
-            </h1>
+            <h1>{title}</h1>
             <p>{subtitle}</p>
           </div>
         </header>
         {view === "bills" && (
           <section id="bills-view">
-            <Summary list={list} />
             <div className="review-layout">
               <BillList
                 list={list}

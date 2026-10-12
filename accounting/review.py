@@ -8,18 +8,39 @@ import json
 
 from .database import Database, json_text, now
 from .ingest import insert
+from .matching import MeituanMatcher, user_edited_fields
 from .web import backup_database
 
 
-def snapshot(connection, start, end, limit):
+def review_policy(connection):
+    database_path = next((r["file"] for r in connection.execute("PRAGMA database_list") if r["name"] == "main"), "")
+    path = Path(database_path).parent / "review-policy.json"
+    if not database_path or not path.is_file():
+        return {}
+    policy = json.loads(path.read_text())
+    if not isinstance(policy, dict) or policy.get("version") != 1:
+        raise ValueError("Unsupported local review policy")
+    return policy
+
+
+def snapshot(connection, start, end, limit, bill_ids=None):
     if not Database.valid_usage_date(start) or not Database.valid_usage_date(end) or start > end:
         raise ValueError("Invalid date range")
     if type(limit) is not int or not 1 <= limit <= 200:
         raise ValueError("Review at most 200 rows")
+    selection, values = "", [start, end]
+    if bill_ids is not None:
+        if type(bill_ids) is not list or not bill_ids or len(bill_ids) > limit or len(set(bill_ids)) != len(bill_ids):
+            raise ValueError("Select distinct bill IDs within the review limit")
+        selection = " AND id IN (" + ",".join("?" for _ in bill_ids) + ")"
+        values.extend(bill_ids)
     rows = connection.execute("""
         SELECT * FROM bills WHERE deleted_at IS NULL AND date(paid_at,'+8 hours') BETWEEN ? AND ?
+    """ + selection + """
         ORDER BY paid_at DESC,id DESC LIMIT ?
-    """, (start, end, limit)).fetchall()
+    """, [*values, limit]).fetchall()
+    if bill_ids is not None and len(rows) != len(bill_ids):
+        raise ValueError("Selected bills must be active and inside the date range")
     items = []
     for index, row in enumerate(rows, 1):
         sources = [dict(r) for r in connection.execute("""
@@ -28,8 +49,15 @@ def snapshot(connection, start, end, limit):
             FROM bill_sources s JOIN raw_records r ON r.id=s.raw_record_id
             JOIN accounts a ON a.id=r.account_id WHERE s.bill_id=? ORDER BY s.is_primary DESC,s.id
         """, (row["id"],))]
-        items.append({"index": index, "bill": dict(row), "sources": sources})
-    return {"start": start, "end": end, "limit": limit, "items": items}
+        questions = [dict(r) for r in connection.execute("SELECT * FROM review_items WHERE bill_id=? AND status='open' ORDER BY id", (row["id"],))]
+        items.append({"index": index, "bill": dict(row), "sources": sources, "review_items": questions})
+    matcher = MeituanMatcher(connection)
+    matches = [matcher.match(item["bill"]["id"]) for item in items if item["bill"]["id"] in matcher.payments]
+    result = {"start": start, "end": end, "limit": limit, "items": items,
+              "meituan_matches": matches, "review_policy": review_policy(connection)}
+    if bill_ids is not None:
+        result["bill_ids"] = bill_ids
+    return result
 
 
 def add_item(db, bill_id, topic, reason, proposal, evidence, batch_id, resolved=False):
@@ -53,7 +81,7 @@ def apply_review(db, sample, decisions):
     by_index = {d["index"]: d for d in decisions}
     if set(by_index) != set(items) or len(by_index) != len(decisions):
         raise ValueError("Decision indices must exactly match the sample")
-    allowed = {"index", "kind", "category", "reason", "action", "confidence", "merge_into", "rename_from", "matching_note", "payment_status"}
+    allowed = {"index", "kind", "category", "reason", "action", "confidence", "merge_into", "rename_from", "matching_note", "payment_status", "resolve_matching"}
     kinds = {"pending", "expense", "income", "refund", "reimbursement", "internal_transfer", "debt_repayment", "investment"}
     for d in decisions:
         if type(d.get("index")) is not int:
@@ -79,16 +107,33 @@ def apply_review(db, sample, decisions):
                 raise ValueError("Description can only come from an explicitly merged Meituan order")
         if "payment_status" in d and d["payment_status"] != "voided":
             raise ValueError("Only source-proven cancellation may change payment status")
+        if "resolve_matching" in d:
+            identifiers = d["resolve_matching"]
+            questions = {q["id"] for q in items[d["index"]]["review_items"] if q["topic"] == "matching"}
+            if type(identifiers) is not list or any(type(i) is not str for i in identifiers) or len(set(identifiers)) != len(identifiers) or not set(identifiers) <= questions:
+                raise ValueError("Resolve only explicitly selected matching questions on this bill")
 
     report = {"selected": len(items), "merged": 0, "classified_expenses": 0, "non_expenses": 0, "uncertain": 0, "tentative": 0, "renamed": 0, "voided": 0, "items": []}
-    with db.batch("ai", "Codex · 逐笔账单试评", "按本人授权检查最近200条账单；不推断使用日期或个人承担金额",
-                  [{"start": sample["start"], "end": sample["end"], "sample_bill_ids": [i["bill"]["id"] for i in items.values()]}]) as batch_id:
+    with db.batch("ai", "Codex · 逐笔账单核对", "按本人授权检查所选账单；不推断使用日期或个人承担金额",
+                  [{"start": sample["start"], "end": sample["end"], "sample_bill_ids": [i["bill"]["id"] for i in items.values()],
+                    "review_policy": sample.get("review_policy", {})}]) as batch_id:
         report["batch_id"] = batch_id
-        current = snapshot(db.connection, sample["start"], sample["end"], sample["limit"])
+        current = snapshot(db.connection, sample["start"], sample["end"], sample["limit"], sample.get("bill_ids"))
         if current != sample:
             raise ValueError("The selected bills or sources changed; author a fresh review")
         if any(i["bill"]["classification_locked"] or i["bill"]["review_status"] != "pending" for i in items.values()):
             raise ValueError("Do not overwrite previously confirmed decisions")
+        matcher = MeituanMatcher(db.connection)
+        order_groups = {}
+        for index, d in by_index.items():
+            if "merge_into" in d and items[index]["sources"][0]["provider"] == "meituan":
+                order_groups.setdefault(d["merge_into"], []).append(items[index]["bill"]["id"])
+        group_evidence = {}
+        for target_index, order_ids in order_groups.items():
+            match = matcher.match(items[target_index]["bill"]["id"])
+            if match["status"] != "unique" or set(match["order_bill_ids"]) != set(order_ids):
+                raise ValueError("Meituan actual-paid group is not unique or complete")
+            group_evidence[target_index] = match
         for index, item in items.items():
             d = by_index[index]
             evidence = {"decision": d, "sample_index": index, "bill_id": item["bill"]["id"],
@@ -98,6 +143,11 @@ def apply_review(db, sample, decisions):
                 UPDATE review_items SET status='dismissed',resolved_batch_id=?,updated_at=?,revision=revision+1
                 WHERE bill_id=? AND status='open' AND topic IN ('nature','category')
             """, (batch_id, now(), item["bill"]["id"]))
+            for identifier in d.get("resolve_matching", []):
+                db.connection.execute("""
+                    UPDATE review_items SET status='resolved',resolved_batch_id=?,updated_at=?,revision=revision+1
+                    WHERE id=? AND status='open'
+                """, (batch_id, now(), identifier))
         for index, item in items.items():
             d = by_index[index]
             if "merge_into" not in d:
@@ -108,33 +158,38 @@ def apply_review(db, sample, decisions):
             survivor_provider = target["sources"][0]["provider"]
             if old_provider not in {"meituan", "icbc"} or survivor_provider not in {"alipay", "wechat", "icbc"} or old_provider == survivor_provider:
                 raise ValueError("Unsupported platform merge")
-            if len(item["sources"]) != 1 or len(target["sources"]) != 1:
-                raise ValueError("Already-linked source groups require a separate review")
-            if any(old[key] != survivor[key] for key in ("amount_cents", "currency", "direction", "payment_status")):
-                raise ValueError("Different amounts, currency, direction or status cannot be merged")
-            if abs((datetime.fromisoformat(old["paid_at"]) - datetime.fromisoformat(survivor["paid_at"])).total_seconds()) > 120:
-                raise ValueError("Composite matches must be within two minutes")
-            order_source = item["sources"][0] if old_provider == "meituan" else target["sources"][0]
-            payload = json.loads(order_source["raw_payload_json"])
-            fields = dict(zip(payload.get("headers", []), payload.get("values", [])))
-            method = fields.get("支付方式", fields.get("收/付款方式", ""))
-            required = {"alipay": "支付宝", "wechat": "微信", "icbc": "工商银行"}[survivor_provider] if old_provider == "meituan" else "工商银行"
-            if required not in method:
-                raise ValueError("Payment method does not support the proposed match")
-            for a, b, provider in ((old, survivor, survivor_provider), (survivor, old, old_provider)):
-                candidates = db.connection.execute("""
-                    SELECT id FROM bill_details WHERE deleted_at IS NULL AND source_provider=?
-                    AND amount_cents=? AND currency=? AND direction=? AND payment_status=?
-                    AND abs(unixepoch(paid_at)-unixepoch(?))<=120
-                """, (provider, a["amount_cents"], a["currency"], a["direction"], a["payment_status"], a["paid_at"])).fetchall()
-                if len(candidates) != 1 or candidates[0]["id"] != b["id"]:
-                    raise ValueError("Composite match is not unique in both directions")
+            if old_provider == "meituan":
+                if any(s["provider"] != "meituan" for s in item["sources"]):
+                    raise ValueError("Do not merge an already-linked payment as an order")
+            else:
+                if len(item["sources"]) != 1 or len(target["sources"]) != 1:
+                    raise ValueError("Already-linked source groups require a separate review")
+                if any(old[key] != survivor[key] for key in ("amount_cents", "currency", "direction", "payment_status")):
+                    raise ValueError("Different amounts, currency, direction or status cannot be merged")
+                if abs((datetime.fromisoformat(old["paid_at"]) - datetime.fromisoformat(survivor["paid_at"])).total_seconds()) > 120:
+                    raise ValueError("Composite matches must be within two minutes")
+                payload = json.loads(target["sources"][0]["raw_payload_json"])
+                fields = dict(zip(payload.get("headers", []), payload.get("values", [])))
+                if "工商银行" not in fields.get("支付方式", fields.get("收/付款方式", "")):
+                    raise ValueError("Payment method does not support the proposed match")
+                for a, b, provider in ((old, survivor, survivor_provider), (survivor, old, old_provider)):
+                    candidates = db.connection.execute("""
+                        SELECT id FROM bill_details WHERE deleted_at IS NULL AND source_provider=?
+                        AND amount_cents=? AND currency=? AND direction=? AND payment_status=?
+                        AND abs(unixepoch(paid_at)-unixepoch(?))<=120
+                    """, (provider, a["amount_cents"], a["currency"], a["direction"], a["payment_status"], a["paid_at"])).fetchall()
+                    if len(candidates) != 1 or candidates[0]["id"] != b["id"]:
+                        raise ValueError("Composite match is not unique in both directions")
+            if user_edited_fields(db.connection, old["id"]):
+                raise ValueError("Do not discard personal edits while merging")
             if old["usage_date"] is not None or old["personal_base_cents"] is not None or old["notes"] is not None or old["inclusion_status"] != "included":
                 raise ValueError("Do not discard personal edits while merging")
             if db.connection.execute("SELECT 1 FROM bill_relations WHERE origin_bill_id=? OR related_bill_id=?", (old["id"], old["id"])).fetchone():
                 raise ValueError("Allocated bills require a separate merge workflow")
             evidence = {"decision": d, "surviving_bill_id": survivor["id"], "merged_bill_id": old["id"],
                         "raw_record_ids": [s["raw_record_id"] for s in item["sources"] + target["sources"]]}
+            if old_provider == "meituan":
+                evidence["payment_group"] = group_evidence[d["merge_into"]]
             db.explain(d["reason"], evidence)
             db.connection.execute("UPDATE bill_sources SET bill_id=?,is_primary=0,role=?,match_method='composite',evidence_json=? WHERE bill_id=?",
                                   (survivor["id"], "order" if old_provider == "meituan" else "funding", json_text(evidence), old["id"]))
@@ -171,6 +226,8 @@ def apply_review(db, sample, decisions):
                     raise ValueError("Use the actual Meituan order title, not an invented description")
                 changes["description"] = source["description"]
             changes = {key: value for key, value in changes.items() if old[key] != value}
+            if set(changes).intersection(user_edited_fields(db.connection, old["id"])):
+                raise ValueError("Do not overwrite personal edits, even before confirmation")
             db.explain(d["reason"], evidence)
             if changes:
                 assignments = ",".join(f"{key}=?" for key in changes)
@@ -206,11 +263,12 @@ def main():
     parser.add_argument("--start", default="2026-04-01")
     parser.add_argument("--end", default="2026-09-30")
     parser.add_argument("--limit", type=int, default=200)
+    parser.add_argument("--bill-id", action="append")
     args = parser.parse_args()
     if args.command == "snapshot":
         db = Database(args.database, readonly=True)
         try:
-            data = snapshot(db.connection, args.start, args.end, args.limit)
+            data = snapshot(db.connection, args.start, args.end, args.limit, args.bill_id)
             args.sample.parent.mkdir(parents=True, exist_ok=True)
             args.sample.write_text(json.dumps(data, ensure_ascii=False, indent=2))
             print(json.dumps({"selected": len(data["items"]), "sample": str(args.sample)}, ensure_ascii=False))

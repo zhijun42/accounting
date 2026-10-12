@@ -33,12 +33,14 @@ it("sends the explicit AI pending filter and validates AI review booleans", asyn
     period: "scope",
     provider: "all",
     kind: "all",
+    category: "unclassified",
     q: "",
     page: 1,
   });
   expect(String(fetch.mock.calls[0]?.[0])).toContain(
     "status=ai_reviewed_pending",
   );
+  expect(String(fetch.mock.calls[0]?.[0])).toContain("category=unclassified");
   await expect(api.detail(bill.id)).rejects.toThrow("接口数据与界面类型不一致");
 });
 it("rejects unsafe integer amounts instead of trusting JSON", async () => {
@@ -63,6 +65,7 @@ it("includes the write token, revision and explicit confirmation flag", async ()
   vi.stubGlobal("fetch", fetch);
   const payload = {
     revision: 1,
+    description: "虚构修改后标题",
     kind: bill.kind,
     direction: bill.direction,
     payment_status: bill.payment_status,

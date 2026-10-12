@@ -18,7 +18,20 @@ PROVIDERS = {"alipay", "wechat", "meituan", "icbc", "manual"}
 
 # A decision can leave every bill field unchanged, so edits alone do not prove an AI review.
 REVIEWED_BILLS = """
-    WITH ai_checks AS (
+    WITH hidden_bills AS (
+        SELECT b.id AS bill_id FROM bills b
+        WHERE b.kind IN ('income','internal_transfer') OR (b.kind = 'pending' AND EXISTS (
+            SELECT 1 FROM bill_sources s JOIN raw_records r ON r.id = s.raw_record_id
+            JOIN accounts a ON a.id = r.account_id
+            WHERE s.bill_id = b.id AND s.is_primary = 1 AND (
+                (a.provider = 'alipay' AND r.original_category = '投资理财'
+                 AND r.direction = 'none' AND r.original_status = '交易成功'
+                 AND r.description GLOB '余额宝-[0-9][0-9][0-9][0-9].[0-9][0-9].[0-9][0-9]-收益发放')
+                OR (a.provider = 'alipay' AND r.original_category = '收入' AND r.direction = 'inflow')
+                OR (a.provider = 'icbc' AND r.direction = 'inflow' AND r.description IN ('利息','结息'))
+            )
+        ))
+    ), ai_checks AS (
         SELECT DISTINCT json_extract(u.after_json, '$.bill_id') AS bill_id
         FROM updates u JOIN change_batches b ON b.id = u.batch_id
         WHERE b.actor_type = 'ai' AND u.entity_table = 'review_items' AND u.operation = 'insert'
@@ -67,7 +80,8 @@ def filters(parameters):
     end = parameters.get("end", "2026-09-30")
     if not start or not end or not Database.valid_usage_date(start) or not Database.valid_usage_date(end) or start > end:
         raise APIError(400, "请选择有效的起止日期")
-    clauses = ["d.deleted_at IS NULL", "date(d.paid_at,'+8 hours') BETWEEN ? AND ?"]
+    clauses = ["d.deleted_at IS NULL", "d.id NOT IN (SELECT bill_id FROM hidden_bills)",
+               "date(d.paid_at,'+8 hours') BETWEEN ? AND ?"]
     values = [start, end]
     provider = parameters.get("provider", "all")
     if provider != "all":
@@ -81,6 +95,13 @@ def filters(parameters):
             raise APIError(400, "资金性质不合法")
         clauses.append("d.kind = ?")
         values.append(kind)
+    category = parameters.get("category", "all")
+    if category == "unclassified":
+        clauses.append("d.kind IN ('pending','expense') AND d.category_id IS NULL")
+    elif category == "categorized":
+        clauses.append("d.kind = 'expense' AND d.category_id IS NOT NULL")
+    elif category != "all":
+        raise APIError(400, "分类筛选不合法")
     query = parameters.get("q", "").strip()
     if len(query) > 200:
         raise APIError(400, "搜索内容过长")
@@ -132,7 +153,14 @@ def list_bills(connection, parameters):
 
 def history_rows(connection, bill_id=None):
     where, values = ("u.entity_table = 'bills' AND u.entity_id = ?", [bill_id]) if bill_id else ("b.actor_type != 'importer'", [])
-    rows = connection.execute(f"""
+    if bill_id is None:
+        where += """ AND NOT (
+            (u.entity_table = 'bills' AND u.entity_id IN (SELECT bill_id FROM hidden_bills))
+            OR (u.entity_table IN ('review_items','bill_sources') AND
+                COALESCE(json_extract(u.after_json, '$.bill_id'), json_extract(u.before_json, '$.bill_id'), '')
+                IN (SELECT bill_id FROM hidden_bills))
+        )"""
+    rows = connection.execute(REVIEWED_BILLS + f"""
         SELECT u.*, b.actor_type, b.actor_label FROM updates u
         JOIN change_batches b ON b.id = u.batch_id
         WHERE {where} ORDER BY u.id DESC LIMIT 100
@@ -146,8 +174,9 @@ def history_rows(connection, bill_id=None):
     return result
 
 
-def bill_detail(connection, bill_id):
-    row = connection.execute(REVIEWED_BILLS + "SELECT * FROM reviewed_bills WHERE id = ? AND deleted_at IS NULL", (bill_id,)).fetchone()
+def bill_detail(connection, bill_id, include_hidden=False):
+    visibility = "" if include_hidden else " AND id NOT IN (SELECT bill_id FROM hidden_bills)"
+    row = connection.execute(REVIEWED_BILLS + "SELECT * FROM reviewed_bills WHERE id = ? AND deleted_at IS NULL" + visibility, (bill_id,)).fetchone()
     if row is None:
         raise APIError(404, "找不到这笔记录")
     sources = []
@@ -169,7 +198,7 @@ def bill_detail(connection, bill_id):
 
 def update_bill(db, bill_id, payload):
     allowed = {"revision", "kind", "direction", "payment_status", "category_id", "personal_base_cents",
-               "usage_date", "notes", "inclusion_status", "exclusion_reason", "confirm"}
+               "usage_date", "notes", "inclusion_status", "exclusion_reason", "description", "confirm"}
     if set(payload) - allowed:
         raise APIError(400, "包含不支持的修改字段")
     revision = integer(payload.get("revision"), 1, 2**53 - 1, "记录版本")
@@ -183,6 +212,10 @@ def update_bill(db, bill_id, payload):
         if old["revision"] != revision:
             raise APIError(409, "这笔记录已被修改，请重新加载后核对；本次修改未保存")
         values = {key: payload.get(key, old[key]) for key in allowed - {"revision", "confirm"}}
+        if "description" in payload:
+            values["description"] = text(payload["description"], 500, "消费标题")
+            if not values["description"]:
+                raise APIError(400, "请填写消费标题")
         if values["kind"] not in KINDS or values["direction"] not in {"outflow", "inflow", "none"}:
             raise APIError(400, "资金性质或方向不合法")
         if values["payment_status"] not in {"settled", "pending", "voided"} or values["inclusion_status"] not in {"included", "excluded"}:
@@ -223,7 +256,8 @@ def update_bill(db, bill_id, payload):
                     revision = revision + 1
                 WHERE bill_id = ? AND status = 'open' AND topic IN ('nature','category','personal_share')
             """, (batch_id, now(), bill_id))
-    return bill_detail(db.connection, bill_id)
+    # The editor needs a successful response before refreshing a bill that has just become hidden.
+    return bill_detail(db.connection, bill_id, include_hidden=True)
 
 
 def create_category(db, payload):

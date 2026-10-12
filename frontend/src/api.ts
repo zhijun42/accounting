@@ -95,6 +95,7 @@ export const api = {
       status: filters.status,
       provider: filters.provider,
       kind: filters.kind,
+      category: filters.category,
       q: filters.q,
       page: String(filters.page),
     });

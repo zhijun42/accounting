@@ -26,7 +26,7 @@ export function Options({ labels }: { labels: Record<string, string> }) {
 }
 
 const fields: Record<string, string> = {
-  description: "交易描述",
+  description: "消费标题",
   merged_into_bill_id: "归并到账单",
   deleted_at: "软删除时间",
   kind: "资金性质",

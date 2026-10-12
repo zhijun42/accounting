@@ -65,6 +65,7 @@ export function ReviewPanel({
 }: Props) {
   const { bill } = detail;
   const [draft, setDraft] = useState<Draft>(() => ({
+    description: bill.description ?? "",
     kind: bill.kind,
     direction: bill.direction,
     payment_status: bill.payment_status,
@@ -99,8 +100,11 @@ export function ReviewPanel({
     if (saving) return;
     setError("");
     try {
+      const description = draft.description.trim();
+      if (!description) throw new Error("请填写消费标题");
       await onSave({
         revision: bill.revision,
+        description,
         kind: draft.kind,
         direction: draft.direction,
         payment_status: draft.payment_status,
@@ -193,6 +197,18 @@ export function ReviewPanel({
           }}
         >
           <fieldset disabled={saving}>
+            <label htmlFor="edit-description">消费标题</label>
+            <input
+              id="edit-description"
+              value={draft.description}
+              maxLength={500}
+              autoComplete="off"
+              placeholder="例如：一场脱口秀"
+              onChange={(event) => change("description", event.target.value)}
+            />
+            <p className="field-help">
+              修改展示标题，原始流水保留；保存后可查看修改历史。
+            </p>
             <div className="field-row">
               <div>
                 <label htmlFor="edit-kind">资金性质</label>
@@ -218,7 +234,13 @@ export function ReviewPanel({
                     onDirty();
                   }}
                 >
-                  <Options labels={kinds} />
+                  <Options
+                    labels={{
+                      ...kinds,
+                      income: "收入（保存后隐藏）",
+                      internal_transfer: "内部转账（保存后隐藏）",
+                    }}
+                  />
                 </select>
               </div>
               <div>

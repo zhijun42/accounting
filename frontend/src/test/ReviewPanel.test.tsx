@@ -28,6 +28,36 @@ it("shows unresolved AI questions without presenting them as confirmation", () =
   ).toHaveTextContent("虚构分类待核对");
   expect(screen.getByLabelText("资金性质")).toHaveValue("pending");
 });
+it("saves an edited title without confirming or changing classification", async () => {
+  const user = userEvent.setup();
+  const input = props();
+  render(<ReviewPanel {...input} />);
+  const title = screen.getByLabelText("消费标题");
+  expect(title).toHaveValue(bill.description);
+  expect(title).toHaveAttribute("maxlength", "500");
+  await user.clear(title);
+  await user.type(title, "  虚构脱口秀  ");
+  await user.click(screen.getByRole("button", { name: "保存修改" }));
+  expect(input.onDirty).toHaveBeenCalled();
+  expect(input.onSave).toHaveBeenCalledWith(
+    expect.objectContaining({
+      description: "虚构脱口秀",
+      kind: bill.kind,
+      category_id: null,
+      confirm: false,
+    }),
+  );
+});
+it("rejects a blank title without submitting changes", async () => {
+  const user = userEvent.setup();
+  const input = props();
+  render(<ReviewPanel {...input} />);
+  await user.clear(screen.getByLabelText("消费标题"));
+  await user.type(screen.getByLabelText("消费标题"), "   ");
+  await user.click(screen.getByRole("button", { name: "保存修改" }));
+  expect(await screen.findByRole("alert")).toHaveTextContent("请填写消费标题");
+  expect(input.onSave).not.toHaveBeenCalled();
+});
 it("saves user date, child category and integer share without confirming a draft", async () => {
   const user = userEvent.setup();
   const input = props();
@@ -62,7 +92,10 @@ it("adding a category preserves unsaved notes and date", async () => {
     "还没保存的备注",
   );
   await user.type(screen.getByLabelText("使用日期"), "2026-10-15");
+  await user.clear(screen.getByLabelText("消费标题"));
+  await user.type(screen.getByLabelText("消费标题"), "虚构草稿标题");
   rerender(<ReviewPanel {...input} assigned="climbing" />);
+  expect(screen.getByLabelText("消费标题")).toHaveValue("虚构草稿标题");
   expect(screen.getByLabelText("给这笔记录留个备注")).toHaveValue(
     "还没保存的备注",
   );
@@ -74,10 +107,13 @@ it("keeps inputs and offers refresh after a revision conflict", async () => {
   const input = props();
   input.onSave.mockRejectedValue(new APIError("记录已被修改", 409));
   render(<ReviewPanel {...input} />);
+  await user.clear(screen.getByLabelText("消费标题"));
+  await user.type(screen.getByLabelText("消费标题"), "保留标题草稿");
   await user.type(screen.getByLabelText("给这笔记录留个备注"), "不能被覆盖");
   await user.click(screen.getByRole("button", { name: "保存修改" }));
   expect(await screen.findByRole("alert")).toHaveTextContent("当前输入已保留");
   expect(screen.getByLabelText("给这笔记录留个备注")).toHaveValue("不能被覆盖");
+  expect(screen.getByLabelText("消费标题")).toHaveValue("保留标题草稿");
 });
 it("clears consumption-only fields when confirming a refund", async () => {
   const user = userEvent.setup();
@@ -120,6 +156,7 @@ it("blocks malformed money and disables all edits during a save", async () => {
   );
   expect(input.onSave).not.toHaveBeenCalled();
   rerender(<ReviewPanel {...input} saving />);
+  expect(screen.getByLabelText("消费标题")).toBeDisabled();
   expect(screen.getByLabelText("给这笔记录留个备注")).toBeDisabled();
   expect(screen.getByRole("button", { name: "确认并下一笔 →" })).toBeDisabled();
 });

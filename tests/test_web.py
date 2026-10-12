@@ -11,9 +11,9 @@ import unittest
 
 from accounting.database import Database
 from accounting.importers import Record, Statement, finalize
-from accounting.ingest import import_statements
+from accounting.ingest import import_statements, issue
 from accounting.review import add_item
-from accounting.web import APIError, LocalServer, backup_database, bill_detail, create_category, list_bills, update_bill
+from accounting.web import APIError, LocalServer, backup_database, bill_detail, create_category, history_rows, list_bills, update_bill
 
 
 def fictional_statements():
@@ -124,6 +124,166 @@ class ReviewTests(ReviewFixture):
     def test_search_treats_wildcards_literally(self):
         self.assertEqual(list_bills(self.db.connection, {"q": "%"})["total"], 1)
         self.assertEqual(list_bills(self.db.connection, {"q": "_"})["total"], 0)
+
+    def test_income_is_hidden_without_deleting_raw_bills_or_audit(self):
+        raw = [dict(row) for row in self.db.connection.execute("SELECT * FROM raw_records ORDER BY id")]
+        result = update_bill(self.db, self.bill_id, {"revision": 1, "kind": "income", "direction": "inflow", "confirm": True})
+        self.assertEqual(result["bill"]["kind"], "income")
+        self.ai_check()
+        all_rows = list_bills(self.db.connection, {})
+        self.assertEqual(all_rows["total"], 1)
+        self.assertEqual(all_rows["summary"]["total"], 1)
+        self.assertEqual(all_rows["summary"]["confirmed"], 0)
+        self.assertEqual(all_rows["summary"]["ai_reviewed_pending"], 0)
+        self.assertEqual(list_bills(self.db.connection, {"kind": "income"})["total"], 0)
+        self.assertEqual(list_bills(self.db.connection, {"q": "100%"})["total"], 0)
+        with self.assertRaises(APIError) as raised:
+            bill_detail(self.db.connection, self.bill_id)
+        self.assertEqual(raised.exception.status, 404)
+        self.assertFalse(history_rows(self.db.connection))
+        self.assertEqual(raw, [dict(row) for row in self.db.connection.execute("SELECT * FROM raw_records ORDER BY id")])
+        self.assertEqual(self.db.connection.execute("SELECT COUNT(*) FROM bills").fetchone()[0], 3)
+        self.assertGreater(len(history_rows(self.db.connection, self.bill_id)), 1)
+
+    def test_pending_source_proven_income_is_hidden_but_refunds_transfers_and_human_decisions_remain(self):
+        first = fictional_statements()[0].records[0]
+        records = [
+            replace(first, transaction_id="fictional-yield", description="余额宝-2026.08.01-收益发放", direction="none", category="投资理财"),
+            replace(first, transaction_id="fictional-principal", description="余额宝-转出到余额", direction="none", category="投资理财"),
+            replace(first, transaction_id="fictional-refund", description="虚构退款", direction="inflow"),
+            replace(first, transaction_id="fictional-receipt", description="虚构用途未明收款", direction="inflow", category="转账红包"),
+            replace(first, transaction_id="fictional-human-decision", description="余额宝-2026.08.02-收益发放", direction="none", category="投资理财"),
+            replace(first, transaction_id="fictional-source-income", description="虚构明确收入", direction="inflow", category="收入"),
+        ]
+        bank = [
+            replace(first, provider="icbc", transaction_id="fictional-interest", description="利息", direction="inflow", category=None),
+            replace(first, provider="icbc", transaction_id="fictional-deposit", description="银联入账", direction="inflow", category=None),
+        ]
+        import_statements(self.db, [finalize(Statement(Path("fictional-income.csv"), "fictional-income-hash", "alipay", records)),
+                                   finalize(Statement(Path("fictional-bank.csv"), "fictional-bank-hash", "icbc", bank))])
+        ids = {row["transaction_id"]: row["id"] for row in self.db.connection.execute("SELECT id,transaction_id FROM bill_details")}
+        hidden_id = ids["fictional-yield"]
+        update_bill(self.db, hidden_id, {"revision": 1, "description": "虚构改名的收益"})
+        update_bill(self.db, self.bill_id, {"revision": 1, "description": "余额宝-2026.08.03-收益发放"})
+        update_bill(self.db, ids["fictional-human-decision"], self.expense(direction="outflow", confirm=False))
+        changes = self.db.connection.total_changes
+        result = list_bills(self.db.connection, {})
+        visible = {row["id"] for row in result["items"]}
+        for identifier in ("fictional-yield", "fictional-interest", "fictional-source-income"):
+            self.assertNotIn(ids[identifier], visible)
+        for identifier in ("fictional-principal", "fictional-refund", "fictional-receipt", "fictional-human-decision", "fictional-deposit"):
+            self.assertIn(ids[identifier], visible)
+        self.assertIn(self.bill_id, visible)
+        self.assertEqual(result["total"], 7)
+        self.assertEqual(result["summary"]["pending"], 7)
+        self.assertEqual(list_bills(self.db.connection, {"q": "虚构改名的收益"})["total"], 0)
+        self.assertEqual(self.db.connection.total_changes, changes)
+        self.assertEqual(self.db.connection.execute("SELECT kind FROM bills WHERE id=?", (hidden_id,)).fetchone()[0], "pending")
+
+    def test_hidden_income_is_filtered_before_pagination(self):
+        first = fictional_statements()[0].records[0]
+        records = [replace(first, transaction_id=f"fictional-income-{index}", category="收入", direction="inflow")
+                   for index in range(60)]
+        import_statements(self.db, [finalize(Statement(Path("fictional-many-income.csv"), "fictional-many-income", "alipay", records))])
+        result = list_bills(self.db.connection, {})
+        self.assertEqual(result["total"], 2)
+        self.assertEqual(len(result["items"]), 2)
+        self.assertEqual(result["summary"]["total"], 2)
+        self.assertFalse(list_bills(self.db.connection, {"page": "2"})["items"])
+
+    def test_internal_transfer_save_hides_the_bill_without_changing_raw_or_amount(self):
+        raw = [tuple(r) for r in self.db.connection.execute("SELECT * FROM raw_records ORDER BY id")]
+        result = update_bill(self.db, self.bill_id, {"revision": 1, "kind": "internal_transfer", "direction": "none"})
+        self.assertEqual((result["bill"]["kind"], result["bill"]["amount_cents"]), ("internal_transfer", 1200))
+        self.assertEqual(list_bills(self.db.connection, {})["total"], 1)
+        self.assertEqual(list_bills(self.db.connection, {"kind": "internal_transfer"})["total"], 0)
+        self.assertFalse(history_rows(self.db.connection))
+        self.assertTrue(history_rows(self.db.connection, self.bill_id))
+        with self.assertRaises(APIError) as raised:
+            bill_detail(self.db.connection, self.bill_id)
+        self.assertEqual(raised.exception.status, 404)
+        self.assertEqual(raw, [tuple(r) for r in self.db.connection.execute("SELECT * FROM raw_records ORDER BY id")])
+
+    def test_raw_only_review_history_is_not_hidden_by_a_null_bill_id(self):
+        raw_id = self.db.connection.execute("SELECT id FROM raw_records LIMIT 1").fetchone()[0]
+        with self.db.batch("ai", "fictional-reviewer", "虚构原始来源问题"):
+            issue(self.db, None, raw_id, "parsing", "虚构未关联原始记录问题")
+        self.assertEqual(len(history_rows(self.db.connection)), 1)
+
+    def test_unclassified_filter_excludes_non_consumption_and_composes_with_review_filters(self):
+        first = fictional_statements()[0].records[0]
+        labels = ("expense", "categorized", "income", "refund", "internal_transfer", "deleted")
+        records = [replace(first, transaction_id="fictional-filter-" + label,
+                           description="虚构筛选-" + label) for label in labels]
+        import_statements(self.db, [finalize(Statement(Path("fictional-filter.csv"), "fictional-filter-hash",
+                                                        "alipay", records, {"warnings": []}))])
+        ids = {row["description"]: row["id"] for row in self.db.connection.execute("SELECT id,description FROM bills")}
+        update_bill(self.db, ids["虚构筛选-expense"], self.expense(category_id=None, confirm=False))
+        update_bill(self.db, ids["虚构筛选-categorized"], self.expense())
+        for kind in ("income", "refund", "internal_transfer"):
+            update_bill(self.db, ids["虚构筛选-" + kind], {"revision": 1, "kind": kind, "direction": "inflow", "confirm": True})
+        with self.db.batch("user", "fictional-user", "虚构软删除"):
+            self.db.connection.execute("UPDATE bills SET deleted_at='2026-10-11T00:00:00Z',revision=revision+1 WHERE id=?",
+                                       (ids["虚构筛选-deleted"],))
+        self.ai_check()
+        result = list_bills(self.db.connection, {"category": "unclassified"})
+        self.assertEqual(result["total"], 3)
+        self.assertEqual(result["summary"]["total"], 3)
+        self.assertEqual(result["summary"]["ai_reviewed_pending"], 1)
+        self.assertTrue(all(row["category_id"] is None and row["kind"] in {"pending", "expense"} for row in result["items"]))
+        self.assertEqual(list_bills(self.db.connection, {"category": "unclassified", "kind": "expense"})["total"], 1)
+        self.assertEqual(list_bills(self.db.connection, {"category": "unclassified", "status": "ai_reviewed_pending"})["total"], 1)
+        self.assertEqual(list_bills(self.db.connection, {"category": "unclassified", "status": "ai_unreviewed_pending"})["total"], 2)
+        self.assertEqual(list_bills(self.db.connection, {"category": "categorized", "status": "confirmed"})["total"], 1)
+        for parameters in ({"provider": "wechat"}, {"kind": "income"}, {"status": "confirmed"}, {"q": "不存在"}, {"page": "2"}):
+            with self.subTest(parameters=parameters):
+                self.assertFalse(list_bills(self.db.connection, {"category": "unclassified", **parameters})["items"])
+        self.assertEqual(list_bills(self.db.connection, {"category": "unclassified", "start": "2026-09-01"})["total"], 1)
+        with self.assertRaises(APIError):
+            list_bills(self.db.connection, {"category": "unknown"})
+
+    def test_title_edit_is_audited_searchable_and_leaves_raw_and_review_state_unchanged(self):
+        old = bill_detail(self.db.connection, self.bill_id)["bill"]
+        raw = [dict(row) for row in self.db.connection.execute("SELECT * FROM raw_records ORDER BY id")]
+        result = update_bill(self.db, self.bill_id, {"revision": 1, "description": "  虚构脱口秀  "})
+        self.assertEqual(result["bill"]["description"], "虚构脱口秀")
+        for field in ("kind", "category_id", "amount_cents", "paid_at", "usage_date", "personal_base_cents", "review_status", "classification_locked"):
+            self.assertEqual(result["bill"][field], old[field])
+        self.assertEqual(result["history"][0]["before"]["description"], old["description"])
+        self.assertEqual(result["history"][0]["after"]["description"], "虚构脱口秀")
+        self.assertEqual(result["history"][0]["actor_type"], "user")
+        self.assertEqual(raw, [dict(row) for row in self.db.connection.execute("SELECT * FROM raw_records ORDER BY id")])
+        self.assertEqual(list_bills(self.db.connection, {"q": "虚构脱口秀"})["items"][0]["id"], self.bill_id)
+        self.assertEqual(list_bills(self.db.connection, {"q": "100%"})["total"], 0)
+        reopened = Database(self.path, readonly=True)
+        try:
+            self.assertEqual(bill_detail(reopened.connection, self.bill_id)["bill"]["description"], "虚构脱口秀")
+        finally:
+            reopened.close()
+        unchanged = update_bill(self.db, self.bill_id, {"revision": 2, "description": " 虚构脱口秀 "})
+        self.assertEqual(unchanged["bill"]["revision"], 2)
+        self.assertEqual(len(unchanged["history"]), len(result["history"]))
+        with self.assertRaises(APIError) as raised:
+            update_bill(self.db, self.bill_id, {"revision": 1, "description": "过期的标题"})
+        self.assertEqual(raised.exception.status, 409)
+
+    def test_invalid_title_does_not_write_bill_or_audit(self):
+        old = bill_detail(self.db.connection, self.bill_id)
+        counts = {table: self.db.connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+                  for table in ("updates", "change_batches")}
+        for title in (None, False, 12, [], {}, "", " \n\t", "字" * 501):
+            with self.subTest(title=title), self.assertRaises(APIError):
+                update_bill(self.db, self.bill_id, {"revision": 1, "description": title})
+        self.assertEqual(bill_detail(self.db.connection, self.bill_id), old)
+        for table, count in counts.items():
+            self.assertEqual(self.db.connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0], count)
+
+    def test_title_only_edit_preserves_confirmed_classification(self):
+        confirmed = update_bill(self.db, self.bill_id, self.expense())
+        result = update_bill(self.db, self.bill_id, {"revision": 2, "description": "虚构已确认的新标题"})
+        self.assertEqual(result["bill"]["review_status"], "user_confirmed")
+        self.assertEqual(result["bill"]["classification_locked"], 1)
+        self.assertEqual(result["bill"]["category_id"], confirmed["bill"]["category_id"])
 
     def test_confirm_persists_date_category_lock_and_audit(self):
         raw_before = self.db.connection.execute("SELECT raw_payload_json FROM raw_records ORDER BY id").fetchall()
@@ -285,6 +445,36 @@ class HTTPTests(ReviewFixture):
         status, _, body = self.request("/api/bills?status=ai_unreviewed_pending")
         self.assertEqual(status, 200)
         self.assertEqual(json.loads(body)["total"], 1)
+
+    def test_http_title_save_and_category_filter(self):
+        endpoint = "/api/bills/" + self.bill_id
+        status, _, body = self.request(endpoint, {"revision": 1, "description": "虚构新标题"})
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["bill"]["description"], "虚构新标题")
+        self.assertEqual(self.request(endpoint, {"revision": 1, "description": "过期标题"})[0], 409)
+        self.assertEqual(self.request(endpoint, {"revision": 2, "description": " "})[0], 400)
+        self.assertEqual(self.request(endpoint, self.expense(revision=2))[0], 200)
+        status, _, body = self.request("/api/bills?category=unclassified")
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["total"], 1)
+        self.assertNotEqual(json.loads(body)["items"][0]["id"], self.bill_id)
+        status, _, body = self.request("/api/bills?category=categorized&status=confirmed")
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["items"][0]["description"], "虚构新标题")
+        self.assertEqual(self.request("/api/bills?category=unknown")[0], 400)
+
+    def test_http_income_save_succeeds_then_leaves_product_views(self):
+        endpoint = "/api/bills/" + self.bill_id
+        status, _, body = self.request(endpoint, {"revision": 1, "kind": "income", "direction": "inflow"})
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["bill"]["kind"], "income")
+        self.assertEqual(self.request(endpoint)[0], 404)
+        status, _, body = self.request("/api/bills")
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["total"], 1)
+        status, _, body = self.request("/api/history")
+        self.assertEqual(status, 200)
+        self.assertFalse(json.loads(body)["items"])
 
 
 if __name__ == "__main__":
